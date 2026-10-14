@@ -1,0 +1,16 @@
+# Build output
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Dependencies
+/node_modules/
+
+# macOS
+.DS_Store
+
+# Never commit update-signing keys
+*.key
+*.key.pub
+
+# Local install copies
+/dist/

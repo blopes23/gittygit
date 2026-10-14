@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gittygit</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header id="toolbar" data-tauri-drag-region>
+    <div class="tb-group tb-left" data-tauri-drag-region>
+      <button class="repo-btn" id="btn-profile" title="Switch profile (⌘⇧1…9)">
+        <span class="pdot big"></span>
+        <span class="repo-text"><small>profile</small><b id="profile-name">—</b></span>
+        <span class="caret">▾</span>
+      </button>
+      <span class="sep">/</span>
+      <div class="repo-btn static" title="Current branch">
+        <span class="i" data-icon="branch"></span>
+        <span class="repo-text"><small>branch</small><b id="branch-name">—</b></span>
+      </div>
+    </div>
+    <div class="tb-group tb-center" data-tauri-drag-region>
+      <button class="act" data-act="pull" title="Pull"><span class="i" data-icon="pull"></span><span>Pull</span><em id="behind-badge"></em></button>
+      <button class="act" data-act="push" title="Push"><span class="i" data-icon="push"></span><span>Push</span><em id="ahead-badge"></em></button>
+      <button class="act" data-act="fetch" title="Fetch all"><span class="i" data-icon="fetch"></span><span>Fetch</span></button>
+      <button class="act" data-act="branch" title="New branch"><span class="i" data-icon="branch"></span><span>Branch</span></button>
+      <button class="act" data-act="stash" title="Stash changes"><span class="i" data-icon="stash"></span><span>Stash</span></button>
+      <button class="act" data-act="pop" title="Pop stash"><span class="i" data-icon="pop"></span><span>Pop</span></button>
+    </div>
+    <div class="tb-group tb-right" data-tauri-drag-region>
+      <input id="search" type="search" placeholder="Find commit ⌘F" spellcheck="false">
+      <button class="act icon" data-act="terminal" title="Open in Terminal"><span class="i" data-icon="terminal"></span></button>
+      <button class="act icon" data-act="finder" title="Reveal in Finder"><span class="i" data-icon="folder"></span></button>
+      <span id="spinner" hidden></span>
+    </div>
+  </header>
+
+  <nav id="tabbar">
+    <div id="tabs"></div>
+    <button id="tab-add" title="Open or clone a repository in this profile (⌘T)">+</button>
+  </nav>
+
+  <main id="layout" hidden>
+    <aside id="sidebar" tabindex="0" title="⌘-click or ⇧-click to select several local branches"></aside>
+    <div class="resizer" data-resize="sidebar"></div>
+    <section id="center">
+      <div id="graph-header">
+        <div class="c-refs">Branch / Tag</div>
+        <div class="c-graph">Graph</div>
+        <div class="c-msg">Commit message</div>
+        <div class="c-author">Author</div>
+        <div class="c-date">Date</div>
+      </div>
+      <div id="graph-scroll" tabindex="0">
+        <div id="graph-spacer"></div>
+        <div id="graph-rows"></div>
+      </div>
+      <div id="diff-view" hidden>
+        <div class="diff-head">
+          <span class="i" data-icon="file"></span>
+          <b id="diff-path"></b>
+          <span id="diff-stats"></span>
+          <span class="spacer"></span>
+          <span id="diff-actions"></span>
+          <button class="ghost" id="diff-close" title="Close (Esc)">✕</button>
+        </div>
+        <div id="diff-body"></div>
+      </div>
+    </section>
+    <div class="resizer" data-resize="detail"></div>
+    <aside id="detail"></aside>
+  </main>
+
+  <section id="welcome">
+    <div class="welcome-card">
+      <div class="logo"><span class="i" data-icon="logo"></span></div>
+      <h1 id="welcome-title">Gittygit</h1>
+      <p id="welcome-sub">A fast, native Git client for Apple silicon.</p>
+      <div class="welcome-actions">
+        <button class="primary" id="welcome-open">Open repository</button>
+        <button class="ghost" id="welcome-clone">Clone…</button>
+      </div>
+      <h3 id="recent-title" hidden>Recent</h3>
+      <ul id="recent-list"></ul>
+    </div>
+  </section>
+
+  <div id="ctx-menu" hidden></div>
+  <div id="toasts"></div>
+  <aside id="update-banner" hidden></aside>
+
+  <dialog id="modal">
+    <form method="dialog">
+      <p id="modal-msg"></p>
+      <input id="modal-input" spellcheck="false" autocomplete="off">
+      <menu>
+        <button value="cancel" class="ghost">Cancel</button>
+        <button value="alt" id="modal-alt" class="ghost" hidden></button>
+        <button value="ok" id="modal-ok" class="primary">OK</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="profiles-dlg">
+    <div class="pd">
+      <aside class="pd-list">
+        <h3>Profiles</h3>
+        <div id="pd-items"></div>
+        <button class="ghost" id="pd-new">+ New profile</button>
+      </aside>
+      <div class="pd-form">
+        <label class="fld">Name <input id="pf-name" spellcheck="false" autocomplete="off"></label>
+        <div class="pf-colors" id="pf-colors"></div>
+
+        <h4>Git author</h4>
+        <div class="two">
+          <label class="fld">Name <input id="pf-gname" placeholder="Bruno Lopes" spellcheck="false" autocomplete="off"></label>
+          <label class="fld">Email <input id="pf-gemail" placeholder="you@company.com" spellcheck="false" autocomplete="off"></label>
+        </div>
+        <small class="hint">Commits made in this profile use this author. Leave empty to use your global git config.</small>
+
+        <h4>SSH key</h4>
+        <div class="line"><select id="pf-key"></select><button class="ghost" id="pf-browse">Browse…</button></div>
+        <div class="line">
+          <input id="pf-host" value="github.com" spellcheck="false" title="Git host to test against">
+          <button class="ghost" id="pf-test">Test connection</button>
+          <button class="ghost" id="pf-keychain" title="Store the key's passphrase in the macOS keychain (runs ssh-add in Terminal)">Add to keychain…</button>
+        </div>
+        <pre id="pf-test-out" class="test-out"></pre>
+        <small class="hint">Fetch, pull, push and clone use only this key (IdentitiesOnly), so ssh-agent can't pick another account.</small>
+
+        <h4>Expected remote owners</h4>
+        <textarea id="pf-owners" spellcheck="false" placeholder="github.com/acme-corp&#10;gitlab.company.io"></textarea>
+        <small class="hint">One per line: host/owner, owner, or host. You're warned when opening or pushing a repo whose remote isn't listed. Empty = no check.</small>
+
+        <h4>Repositories</h4>
+        <div id="pf-repos"></div>
+
+        <menu>
+          <button class="ghost danger-txt" id="pf-delete">Delete profile</button>
+          <span class="spacer"></span>
+          <button class="ghost" id="pf-cancel">Cancel</button>
+          <button class="primary" id="pf-save">Save</button>
+        </menu>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="app.js"></script>
+  <script src="profiles.js"></script>
+  <script src="updates.js"></script>
+</body>
+</html>
