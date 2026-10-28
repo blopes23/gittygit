@@ -33,10 +33,13 @@ jobs:
 
       - run: npm ci
 
-      - name: Release notes from commits since the previous tag
+      - name: Release notes from commits since the previous published release
         id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          # Previous *published* release, so tags whose build failed don't swallow their changes.
+          prev=$(gh release list --exclude-drafts --limit 50 --json tagName --jq '.[].tagName' | grep -vx "$GITHUB_REF_NAME" | head -1 || true)
           {
             echo 'body<<NOTES_EOF'
             git log --no-merges --format='%x1e%s%x1f%b' "${prev:+$prev..}${GITHUB_REF_NAME}" | node scripts/release-notes.mjs
@@ -45,21 +48,30 @@ jobs:
 
       # A stable signing certificate keeps the app's identity the same across updates, so
       # macOS remembers folder-access permissions instead of asking again after each update.
-      - name: Use code-signing certificate (if configured)
+      # The certificate is self-signed, so it is imported here and only its name is passed on:
+      # given APPLE_CERTIFICATE, Tauri would look it up among *trusted* identities and fail.
+      - name: Import code-signing certificate (if configured)
         env:
           CERT: ${{ secrets.APPLE_CERTIFICATE }}
           CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          if [ -n "$CERT" ]; then
-            {
-              echo "APPLE_CERTIFICATE=$CERT"
-              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
-              echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
-            } >> "$GITHUB_ENV"
-          else
+          if [ -z "$CERT" ]; then
             echo "::warning::No signing certificate secrets; building ad-hoc signed (macOS will re-ask for folder access after updates)."
+            exit 0
           fi
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KC_PW="$(openssl rand -hex 24)"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -p codesigning "$KC" | grep -q "\"$IDENTITY\"" || { echo "::error::Identity '$IDENTITY' not found in the imported certificate"; exit 1; }
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - uses: tauri-apps/tauri-action@v0
         env:
