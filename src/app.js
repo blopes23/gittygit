@@ -53,6 +53,9 @@ const S = {
   sbSel: new Set(), // multi-selected local branch names
   sbAnchor: null, // anchor for shift-click ranges
   busy: 0,
+  lineSel: new Set(), // picked diff lines ("hunk:line")
+  lineAnchor: null,
+  undo: null, // last undoable action, see offerUndo()
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -81,12 +84,22 @@ function hydrateIcons(root = document) {
   });
 }
 
-function toast(msg, kind = '') {
+function toast(msg, kind = '', action = null) {
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
   el.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'mini';
+    b.textContent = action.label;
+    b.addEventListener('click', () => {
+      el.remove();
+      action.fn();
+    });
+    el.appendChild(b);
+  }
   $('#toasts').appendChild(el);
-  setTimeout(() => el.remove(), kind === 'err' ? 9000 : 3500);
+  setTimeout(() => el.remove(), action ? 15000 : kind === 'err' ? 9000 : 3500);
 }
 
 async function busy(fn) {
@@ -112,6 +125,8 @@ function explainGitError(msg) {
       : `Profile “${p.name}” has no SSH key — ssh tried its defaults. Pick a key in Profiles.`;
     return `${msg}\n\n${hint}`;
   }
+  if (/stale info|remote ref updated since checkout/.test(msg))
+    return `${msg}\n\nSomeone else pushed to this branch and their commits aren't in yours, so the force push was refused to avoid overwriting their work. Pull (or rebase onto the remote branch) first, then push again.`;
   if (/Host key verification failed/.test(msg)) return `${msg}\n\nThe server's host key changed or is untrusted; check ~/.ssh/known_hosts.`;
   return msg;
 }
@@ -126,10 +141,15 @@ async function gitRaw(args) {
 }
 
 /** Run a mutating git command; returns stdout or null on failure (already toasted). */
-async function git(args, okMsg) {
+function git(args, okMsg) {
+  return runGit(() => gitRaw(args), okMsg);
+}
+
+/** Like git(), for any backend call that runs git (conflicts jump to the WIP panel). */
+async function runGit(fn, okMsg) {
   return busy(async () => {
     try {
-      const out = await gitRaw(args);
+      const out = await fn();
       if (okMsg) toast(okMsg, 'ok');
       await refresh();
       return out ?? '';
@@ -182,6 +202,64 @@ $('#modal-input').addEventListener('keydown', (e) => {
     $('#modal').close('ok');
   }
 });
+
+// ------------------------------------------------------------------ undo
+
+/**
+ * Remember how to reverse the last destructive action. Offered in the toast and with ⌘Z;
+ * only the most recent action can be undone, and only in the repository it happened in.
+ */
+function offerUndo(msg, fn) {
+  const entry = { repo: S.repo, msg, fn };
+  S.undo = entry;
+  toast(msg, 'ok', { label: 'Undo', fn: () => runUndo(entry) });
+}
+
+async function runUndo(entry = S.undo) {
+  if (!entry) return;
+  if (entry !== S.undo) return toast('Only the most recent action can be undone', 'err');
+  if (entry.repo !== S.repo) return toast('Switch back to that repository tab to undo', 'err');
+  S.undo = null;
+  await busy(async () => {
+    try {
+      await entry.fn();
+      toast(`Undone: ${entry.msg}`, 'ok');
+    } catch (e) {
+      toast(`Couldn't undo: ${e}`, 'err');
+    }
+    await refresh();
+  });
+}
+
+const takeSnapshot = (paths, index = false) => invoke('snapshot_files', { repo: S.repo, paths, index });
+const restoreSnapshot = (snapshot) => invoke('restore_files', { profileId: activeProfile().id, repo: S.repo, snapshot });
+const revParse = async (rev) => (await gitRaw(['rev-parse', rev])).trim();
+
+/**
+ * Run something that moves the current branch (reset, amend, rebase) and offer to move it back.
+ * `undoMode` is the reset mode that reverses it; `snapshot` also brings back discarded changes.
+ */
+async function moveHead(fn, okMsg, { undoMode = 'keep', snapshot = null } = {}) {
+  let before, branch;
+  try {
+    before = await revParse('HEAD');
+    branch = (await gitRaw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+  } catch {}
+  const out = await runGit(typeof fn === 'function' ? fn : () => gitRaw(fn));
+  if (out === null) return null;
+  const after = await revParse('HEAD').catch(() => '');
+  if (!before || !after || (after === before && !snapshot)) {
+    if (okMsg) toast(okMsg, 'ok');
+    return out;
+  }
+  offerUndo(okMsg, async () => {
+    const [now, nowBranch] = [await revParse('HEAD'), (await gitRaw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()];
+    if (now !== after || nowBranch !== branch) throw `${branch} has changed since then`;
+    await gitRaw(['reset', `--${undoMode}`, before]);
+    if (snapshot) await restoreSnapshot(snapshot);
+  });
+  return out;
+}
 
 function fmtDate(t) {
   if (!t) return '';
@@ -238,9 +316,12 @@ async function refresh() {
     if (S.conflictPath && !status.conflicted.some((f) => f.path === S.conflictPath)) closeConflict();
     S.index = new Map(S.rows.map((r, i) => [r.sha, i]));
     if (!S.selected || !S.index.has(S.selected)) S.selected = graph.dirty ? 'WIP' : graph.head_sha;
-    if (S.file && S.file.mode !== 'commit') {
-      const all = [...status.staged, ...status.unstaged, ...status.conflicted];
-      if (all.some((f) => f.path === S.file.path)) showDiff(S.file, true);
+    if (S.file && (S.file.mode === 'staged' || S.file.mode === 'unstaged')) {
+      // Follow the file when all of it moved between unstaged and staged (e.g. last hunk staged).
+      const has = (list) => list.some((f) => f.path === S.file.path);
+      const other = S.file.mode === 'staged' ? 'unstaged' : 'staged';
+      if (has(status[S.file.mode])) showDiff(S.file, true);
+      else if (has(status[other])) showDiff({ ...S.file, mode: other, untracked: false });
       else closeDiff();
     }
     renderToolbar();
@@ -276,6 +357,24 @@ function renderToolbar() {
   document.title = `${S.name} — Gittygit`;
 }
 
+/**
+ * Overwrite the upstream branch after amending/rebasing pushed commits. --force-with-lease and
+ * --force-if-includes refuse if the remote has commits we haven't fetched and integrated.
+ */
+async function forcePush(b, afterReject = false) {
+  const why = afterReject
+    ? `Push was rejected: ${b.upstream} has commits that aren't on your local ${b.name}. That usually means you amended or rebased commits you had already pushed.\n\n`
+    : '';
+  const ok = await ask(
+    `${why}Force push ${b.name} to ${b.upstream}?\n\nThe remote branch is replaced with yours. It's a safe force push (with lease): it's refused if someone else pushed in the meantime.`,
+    { ok: 'Force push', danger: true },
+  );
+  if (ok !== true) return;
+  if (!afterReject && !(await confirmRemoteForProfile('Force push'))) return;
+  const dest = b.upstream_ref || `refs/heads/${b.name}`;
+  await git(['push', '--force-with-lease', '--force-if-includes', b.upstream_remote, `${b.name}:${dest}`], `Force-pushed ${b.name} → ${b.upstream}`);
+}
+
 function defaultRemote() {
   const names = S.refs?.remote_names || [];
   return names.includes('origin') ? 'origin' : names[0];
@@ -289,10 +388,26 @@ const ACTIONS = {
     const b = currentBranch();
     if (!b) return toast('Not on a branch', 'err');
     if (!(await confirmRemoteForProfile('Push'))) return;
-    if (b.upstream) return git(['push'], `Pushed ${b.name}`);
-    const remote = defaultRemote();
-    if (!remote) return toast('This repository has no remotes', 'err');
-    await git(['push', '-u', remote, b.name], `Pushed ${b.name} → ${remote}/${b.name}`);
+    if (!b.upstream) {
+      const remote = defaultRemote();
+      if (!remote) return toast('This repository has no remotes', 'err');
+      return git(['push', '-u', remote, b.name], `Pushed ${b.name} → ${remote}/${b.name}`);
+    }
+    let rejected = null;
+    await busy(async () => {
+      try {
+        await gitRaw(['push']);
+        toast(`Pushed ${b.name}`, 'ok');
+      } catch (e) {
+        const msg = String(e);
+        if (/\(fetch first\)/.test(msg)) rejected = 'fetch';
+        else if (/\(non-fast-forward\)/.test(msg)) rejected = 'diverged';
+        else toast(msg, 'err');
+      }
+      await refresh();
+    });
+    if (rejected === 'fetch') toast(`${b.upstream} has commits you don't have yet. Pull first, then push again.`, 'err');
+    if (rejected === 'diverged') forcePush(b, true);
   },
   async fetch() {
     await git(['fetch', '--all', '--prune'], 'Fetched all remotes');
@@ -458,13 +573,37 @@ $('#sidebar').addEventListener('contextmenu', (e) => {
       ['Apply stash', () => git(['stash', 'apply', ref], 'Stash applied')],
       ['Pop stash', () => git(['stash', 'pop', ref], 'Stash popped')],
       null,
-      ['Delete stash…', () => confirmRun(`Delete ${ref}?`, ['stash', 'drop', ref], 'Stash deleted'), 'danger'],
+      ['Delete stash…', () => dropStash(ref, name), 'danger'],
     ]);
   }
   showMenu(e, refMenu(kind, name, sha));
 });
 
 // ------------------------------------------------------------------ branch operations
+
+async function dropStash(ref, message) {
+  if (!(await ask(`Delete ${ref}?\n\n${message}`, { ok: 'Delete', danger: true }))) return;
+  const out = await git(['stash', 'drop', ref]);
+  const sha = /\(([0-9a-f]{7,64})\)/.exec(out || '')?.[1];
+  if (sha) offerUndo(`Deleted ${ref}`, () => gitRaw(['stash', 'store', '-m', message, sha]));
+}
+
+async function deleteTag(name) {
+  if (!(await ask(`Delete local tag ${name}?`, { ok: 'Delete', danger: true }))) return;
+  const obj = await revParse(`refs/tags/${name}`).catch(() => null);
+  const out = await git(['tag', '-d', name]);
+  if (out === null) return;
+  if (obj) offerUndo(`Deleted tag ${name}`, () => gitRaw(['tag', name, obj]));
+}
+
+async function deleteRemoteBranch(name, remote, branch) {
+  if (!(await ask(`Delete branch ${branch} on remote ${remote}?`, { ok: 'Delete', danger: true }))) return;
+  const sha = S.refs.remotes.find((r) => r.name === name)?.sha;
+  const out = await git(['push', remote, '--delete', branch]);
+  if (out === null) return;
+  if (sha) offerUndo(`Deleted ${name}`, () => gitRaw(['push', remote, `${sha}:refs/heads/${branch}`]));
+  else toast(`Deleted ${name}`, 'ok');
+}
 
 async function confirmRun(msg, args, okMsg) {
   if (await ask(msg, { ok: 'Continue', danger: true })) await git(args, okMsg);
@@ -486,7 +625,7 @@ function refMenu(kind, name, sha) {
     return [
       ['Copy tag name', () => navigator.clipboard.writeText(name)],
       null,
-      ['Delete tag…', () => confirmRun(`Delete local tag ${name}?`, ['tag', '-d', name], `Deleted tag ${name}`), 'danger'],
+      ['Delete tag…', () => deleteTag(name), 'danger'],
     ];
   }
   if (kind === 'remote') {
@@ -495,11 +634,11 @@ function refMenu(kind, name, sha) {
     return [
       [`Checkout ${branch}`, () => checkoutRemote(name)],
       cur && [`Merge ${name} into ${cur}`, () => git(['merge', name], `Merged ${name}`)],
-      cur && [`Rebase ${cur} onto ${name}`, () => git(['rebase', name], `Rebased onto ${name}`)],
+      cur && [`Rebase ${cur} onto ${name}`, () => moveHead(['rebase', name], `Rebased ${cur} onto ${name}`)],
       null,
       ['Copy branch name', () => navigator.clipboard.writeText(name)],
       null,
-      remote && [`Delete ${name} on ${remote}…`, () => confirmRun(`Delete branch ${branch} on remote ${remote}?`, ['push', remote, '--delete', branch], `Deleted ${name}`), 'danger'],
+      remote && [`Delete ${name} on ${remote}…`, () => deleteRemoteBranch(name, remote, branch), 'danger'],
     ];
   }
   const isCur = name === cur;
@@ -509,8 +648,9 @@ function refMenu(kind, name, sha) {
     !isCur && [`Checkout ${name}`, () => checkoutLocal(name)],
     canFF && [`Pull ${br.upstream} into ${name} (fast-forward)${br.behind ? `  ↓${br.behind}` : ''}`, () => fastForward([br])],
     !isCur && cur && [`Merge ${name} into ${cur}`, () => git(['merge', name], `Merged ${name} into ${cur}`)],
-    !isCur && cur && [`Rebase ${cur} onto ${name}`, () => git(['rebase', name], `Rebased ${cur} onto ${name}`)],
+    !isCur && cur && [`Rebase ${cur} onto ${name}`, () => moveHead(['rebase', name], `Rebased ${cur} onto ${name}`)],
     isCur && ['Push', () => ACTIONS.push()],
+    isCur && br?.upstream && ['Force push (with lease)…', () => forcePush(br), 'danger'],
     isCur && ['Pull', () => ACTIONS.pull()],
     null,
     ['Create branch here…', () => newBranchAt(sha)],
@@ -526,11 +666,14 @@ const nameList = (names, max = 12) =>
 
 /** Delete local branches one by one, sorting failures into "not merged" and other errors. */
 async function runBranchDeletes(names, flag) {
-  const res = { deleted: [], unmerged: [], failed: [] };
+  const res = { deleted: [], unmerged: [], failed: [], was: new Map() };
   for (const n of names) {
     try {
-      await gitRaw(['branch', flag, n]);
+      const out = await gitRaw(['branch', flag, n]);
       res.deleted.push(n);
+      // "Deleted branch x (was 1a2b3c4)." — enough to recreate it.
+      const was = /\(was ([0-9a-f]+)\)/.exec(out)?.[1];
+      if (was) res.was.set(n, was);
     } catch (e) {
       if (/not fully merged/.test(String(e))) res.unmerged.push(n);
       else res.failed.push(`${n}: ${e}`);
@@ -561,11 +704,18 @@ async function deleteBranches(names) {
       if (force) {
         const forced = await runBranchDeletes(res.unmerged, '-D');
         res.deleted.push(...forced.deleted);
+        forced.was.forEach((v, k) => res.was.set(k, v));
         res.failed.push(...forced.failed);
         res.unmerged = forced.unmerged;
       }
     }
-    if (res.deleted.length) toast(res.deleted.length === 1 ? `Deleted ${res.deleted[0]}` : `Deleted ${plural(res.deleted.length, 'branch')}`, 'ok');
+    if (res.deleted.length) {
+      const msg = res.deleted.length === 1 ? `Deleted ${res.deleted[0]}` : `Deleted ${plural(res.deleted.length, 'branch')}`;
+      const restore = [...res.was];
+      offerUndo(msg, async () => {
+        for (const [n, sha] of restore) await gitRaw(['branch', n, sha]);
+      });
+    }
     if (res.unmerged.length) toast(`Kept ${plural(res.unmerged.length, 'unmerged branch')}`);
     if (res.failed.length) toast(res.failed.join('\n'), 'err');
     // Keep only branches that survived (e.g. declined force delete) so they can be retried.
@@ -809,13 +959,35 @@ $('#graph-rows').addEventListener('contextmenu', (e) => {
     ['Cherry-pick commit', () => git(['cherry-pick', ...merge, r.sha], `Cherry-picked ${short(r.sha)}`)],
     ['Revert commit', () => git(['revert', '--no-edit', ...merge, r.sha], `Reverted ${short(r.sha)}`)],
     null,
-    [`Reset ${cur} to here — soft`, () => git(['reset', '--soft', r.sha], `Soft reset to ${short(r.sha)}`)],
-    [`Reset ${cur} to here — mixed`, () => git(['reset', '--mixed', r.sha], `Mixed reset to ${short(r.sha)}`)],
-    [`Reset ${cur} to here — hard…`, () => confirmRun(`Hard reset ${cur} to ${short(r.sha)}?\nUncommitted changes will be lost.`, ['reset', '--hard', r.sha], `Hard reset to ${short(r.sha)}`), 'danger'],
+    r.sha !== S.graph?.head_sha && [`Interactive rebase ${cur} from here…`, () => openRebase(r.sha)],
+    null,
+    [`Reset ${cur} to here — soft`, () => resetTo(r.sha, 'soft')],
+    [`Reset ${cur} to here — mixed`, () => resetTo(r.sha, 'mixed')],
+    [`Reset ${cur} to here — hard…`, () => resetTo(r.sha, 'hard'), 'danger'],
     null,
     ['Copy commit SHA', () => navigator.clipboard.writeText(r.sha).then(() => toast('SHA copied'))],
   ]);
 });
+
+/** Reset the current branch; undo moves it back and restores what a hard reset threw away. */
+async function resetTo(sha, mode) {
+  const cur = currentBranch()?.name || 'HEAD';
+  if (mode === 'hard' && !(await ask(`Hard reset ${cur} to ${short(sha)}?\nUncommitted changes are discarded (you can undo right after).`, { ok: 'Reset', danger: true }))) return;
+  let snapshot = null;
+  try {
+    // Mixed/hard rewrite the index; hard also the working tree (untracked files are left alone).
+    const tracked = mode === 'hard' ? dirtyPaths().filter((p) => !S.status.unstaged.some((f) => f.path === p && f.status === '?')) : [];
+    if (mode !== 'soft') snapshot = await takeSnapshot(tracked, true);
+  } catch (e) {
+    return toast(`Couldn't save your changes before the reset: ${e}`, 'err');
+  }
+  await moveHead(['reset', `--${mode}`, sha], `${mode[0].toUpperCase()}${mode.slice(1)} reset ${cur} to ${short(sha)}`, {
+    undoMode: mode === 'hard' ? 'keep' : mode,
+    snapshot,
+  });
+}
+
+const dirtyPaths = () => [...new Set([...S.status.staged, ...S.status.unstaged, ...S.status.conflicted].map((f) => f.path))];
 
 async function newTag(sha) {
   const name = await ask(`New tag at ${short(sha)}`, { input: true, placeholder: 'v1.0.0', ok: 'Create' });
@@ -823,12 +995,13 @@ async function newTag(sha) {
 }
 
 async function discardAll() {
-  if (!(await ask('Discard ALL uncommitted changes, including untracked files?\nThis cannot be undone.', { ok: 'Discard all', danger: true }))) return;
+  if (!(await ask('Discard ALL uncommitted changes, including untracked files?', { ok: 'Discard all', danger: true }))) return;
   await busy(async () => {
     try {
+      const snapshot = await takeSnapshot(dirtyPaths(), true);
       if (S.graph?.head_sha) await gitRaw(['reset', '--hard']);
       await gitRaw(['clean', '-fd']);
-      toast('All changes discarded', 'ok');
+      offerUndo('All changes discarded', () => restoreSnapshot(snapshot));
     } catch (e) {
       toast(String(e), 'err');
     }
@@ -1002,7 +1175,9 @@ function updateCommitButton() {
 async function doCommit() {
   if ($('#c-go').disabled) return;
   const msg = draft.summary.trim() + (draft.body.trim() ? `\n\n${draft.body.trim()}` : '');
-  const out = await git(['commit', ...(draft.amend ? ['--amend'] : []), '-m', msg], draft.amend ? 'Commit amended' : 'Committed');
+  const args = ['commit', ...(draft.amend ? ['--amend'] : []), '-m', msg];
+  // Undoing an amend brings back the original commit, with the amended changes staged.
+  const out = draft.amend ? await moveHead(args, 'Commit amended', { undoMode: 'soft' }) : await git(args, 'Committed');
   if (out !== null) {
     draft.summary = draft.body = '';
     draft.amend = false;
@@ -1029,10 +1204,12 @@ async function fileAction(kind, path, status) {
       if (kind === 'stage-all') await gitRaw(['add', '-A']);
       if (kind === 'unstage-all') await unstage(S.status.staged.map((f) => f.path));
       if (kind === 'discard') {
-        if (!(await ask(`Discard changes to ${path}?\nThis cannot be undone.`, { ok: 'Discard', danger: true }))) return;
+        if (!(await ask(`Discard changes to ${path}?`, { ok: 'Discard', danger: true }))) return;
+        const snapshot = await takeSnapshot([path]);
         if (status === '?') await gitRaw(['clean', '-f', '--', path]);
         else await gitRaw(['restore', '--worktree', '--', path]);
         if (S.file?.path === path) closeDiff();
+        offerUndo(`Discarded changes to ${path}`, () => restoreSnapshot(snapshot));
       }
     } catch (e) {
       toast(String(e), 'err');
@@ -1100,42 +1277,144 @@ async function renderCommit(sha) {
 
 // ------------------------------------------------------------------ diff view
 
+/** Parse a unified diff of one file into header lines and hunks. */
 function parseDiff(text) {
-  const lines = text.split('\n');
-  let html = '';
-  let oldN = 0, newN = 0, adds = 0, dels = 0, inHunk = false, count = 0;
-  for (const line of lines) {
-    if (line.startsWith('Binary files')) return { html: '<div class="diff-empty">Binary file — no text diff available.</div>', adds, dels };
+  const m = { header: [], hunks: [], binary: false, whole: false, adds: 0, dels: 0 };
+  let h = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('Binary files')) m.binary = true;
     if (line.startsWith('@@')) {
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/.exec(line);
-      if (m) {
-        oldN = +m[1];
-        newN = +m[2];
-        inHunk = true;
-        html += `<div class="hunk">${esc(line)}</div>`;
-      }
+      const r = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (!r) continue;
+      h = { head: line, old: +r[1], new: +r[2], lines: [] };
+      m.hunks.push(h);
       continue;
     }
-    if (!inHunk) continue;
-    if (++count > 20000) {
-      html += '<div class="diff-empty">Diff truncated (over 20,000 lines).</div>';
-      break;
+    if (!h) {
+      if (line) m.header.push(line);
+      // New, deleted and renamed files are staged as a whole.
+      if (/^(new file|deleted file|rename from|copy from)/.test(line)) m.whole = true;
+      continue;
     }
-    const t = line.slice(1);
-    if (line[0] === '+') {
-      adds++;
-      html += `<div class="dl add"><span class="n"></span><span class="n">${newN++}</span><span class="s">+</span><span class="t">${esc(t)}</span></div>`;
-    } else if (line[0] === '-') {
-      dels++;
-      html += `<div class="dl del"><span class="n">${oldN++}</span><span class="n"></span><span class="s">−</span><span class="t">${esc(t)}</span></div>`;
-    } else if (line[0] === ' ') {
-      html += `<div class="dl"><span class="n">${oldN++}</span><span class="n">${newN++}</span><span class="s"></span><span class="t">${esc(t)}</span></div>`;
-    } else if (line[0] === '\\') {
-      html += `<div class="dl"><span class="n"></span><span class="n"></span><span class="s"></span><span class="t" style="color:var(--text-faint)">${esc(line)}</span></div>`;
+    const k = line[0];
+    if (k === '+' || k === '-' || k === ' ') {
+      h.lines.push({ k, t: line.slice(1) });
+      if (k === '+') m.adds++;
+      if (k === '-') m.dels++;
+    } else if (k === '\\' && h.lines.length) h.lines[h.lines.length - 1].noeol = true;
+  }
+  return m;
+}
+
+/** Can lines/hunks of this diff be staged, unstaged or discarded on their own? */
+const partialOk = (file, m) => (file.mode === 'unstaged' || file.mode === 'staged') && !file.untracked && !m.binary && !m.whole && m.hunks.length;
+
+function diffHtml(m, file) {
+  if (m.binary) return '<div class="diff-empty">Binary file — no text diff available.</div>';
+  if (!m.hunks.length) return '<div class="diff-empty">No textual changes (mode change or empty file).</div>';
+  const partial = partialOk(file, m);
+  const hunkBtns =
+    !partial ? '' : file.mode === 'unstaged'
+      ? '<button class="mini" data-hunk="stage">Stage hunk</button><button class="mini danger" data-hunk="discard">Discard hunk</button>'
+      : '<button class="mini" data-hunk="unstage">Unstage hunk</button>';
+  let html = '', count = 0;
+  for (const [hi, h] of m.hunks.entries()) {
+    html += `<div class="hunk" data-h="${hi}"><span>${esc(h.head)}</span>${hunkBtns}</div>`;
+    let o = h.old, n = h.new;
+    for (const [li, ln] of h.lines.entries()) {
+      if (++count > 20000) return `<div class="diff-lines${partial ? ' picking' : ''}">${html}</div><div class="diff-empty">Diff truncated (over 20,000 lines).</div>`;
+      const key = `${hi}:${li}`;
+      const eol = ln.noeol ? '<span class="noeol" title="No newline at end of file">⏎̸</span>' : '';
+      if (ln.k === '+')
+        html += `<div class="dl add${S.lineSel.has(key) ? ' picked' : ''}" data-k="${key}"><span class="n"></span><span class="n">${n++}</span><span class="s">+</span><span class="t">${esc(ln.t)}${eol}</span></div>`;
+      else if (ln.k === '-')
+        html += `<div class="dl del${S.lineSel.has(key) ? ' picked' : ''}" data-k="${key}"><span class="n">${o++}</span><span class="n"></span><span class="s">−</span><span class="t">${esc(ln.t)}${eol}</span></div>`;
+      else html += `<div class="dl"><span class="n">${o++}</span><span class="n">${n++}</span><span class="s"></span><span class="t">${esc(ln.t)}${eol}</span></div>`;
     }
   }
-  if (!html) return { html: '<div class="diff-empty">No textual changes (mode change or empty file).</div>', adds, dels };
-  return { html: `<div class="diff-lines">${html}</div>`, adds, dels };
+  return `<div class="diff-lines${partial ? ' picking' : ''}">${html}</div>`;
+}
+
+/**
+ * Patch containing only the picked changed lines. Applied forward (stage) the target is the
+ * old side, so unpicked "-" lines stay as context and unpicked "+" lines vanish; applied in
+ * reverse (unstage/discard) it's the other way round. `git apply --recount` fixes the counts.
+ */
+function buildPatch(m, pick, reverse) {
+  let out = '';
+  for (const [hi, h] of m.hunks.entries()) {
+    const body = [];
+    let picked = 0;
+    for (const [li, ln] of h.lines.entries()) {
+      let k = ln.k;
+      if (k !== ' ') {
+        if (pick(hi, li)) picked++;
+        else if ((k === '-') !== reverse) k = ' ';
+        else continue;
+      }
+      body.push(k + ln.t);
+      if (ln.noeol) body.push('\\ No newline at end of file');
+    }
+    if (picked) out += `@@ -${h.old} +${h.new} @@\n${body.join('\n')}\n`;
+  }
+  if (!out) return '';
+  const header = m.header.filter((l) => !/^(old|new) mode /.test(l));
+  return `${header.join('\n')}\n${out}`;
+}
+
+async function applyPicked(mode, pick, what) {
+  const file = S.file;
+  const m = S.diffModel;
+  if (!file || !m) return;
+  const patch = buildPatch(m, pick, mode !== 'stage');
+  if (!patch) return;
+  if (mode === 'discard' && !(await ask(`Discard ${what} in ${file.path}?`, { ok: 'Discard', danger: true }))) return;
+  await busy(async () => {
+    try {
+      const snapshot = mode === 'discard' ? await takeSnapshot([file.path]) : null;
+      await invoke('apply_patch', { profileId: activeProfile().id, repo: S.repo, patch, mode });
+      S.lineSel.clear();
+      if (snapshot) offerUndo(`Discarded ${what} in ${file.path}`, () => restoreSnapshot(snapshot));
+    } catch (e) {
+      toast(explainGitError(String(e)), 'err');
+    }
+    await refresh();
+  });
+}
+
+function diffActionsHtml(file) {
+  const n = S.lineSel.size;
+  const lines = `${n} line${n === 1 ? '' : 's'}`;
+  if (n && file.mode === 'unstaged')
+    return `<button class="mini" data-diff-do="lines-stage">Stage ${lines}</button><button class="mini danger" data-diff-do="lines-discard">Discard ${lines}</button><button class="mini" data-diff-do="lines-clear">Clear</button>`;
+  if (n && file.mode === 'staged')
+    return `<button class="mini" data-diff-do="lines-unstage">Unstage ${lines}</button><button class="mini" data-diff-do="lines-clear">Clear</button>`;
+  const back = file.back ? '<button class="mini" data-diff-do="back">← Back</button>' : '';
+  const nav = file.untracked
+    ? ''
+    : ['blame', 'history'].filter((m) => m !== file.mode).map((m) => `<button class="mini" data-diff-do="${m}">${m[0].toUpperCase()}${m.slice(1)}</button>`).join('');
+  if (file.mode === 'unstaged') return back + nav + '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>';
+  if (file.mode === 'staged') return back + nav + '<button class="mini" data-diff-do="unstage">Unstage file</button>';
+  return back + nav;
+}
+
+/** Open a full-pane view (diff, blame, history) for a file, replacing the current one. */
+function openFileView(file) {
+  if (file.mode === 'blame') return showBlame(file);
+  if (file.mode === 'history') return showHistory(file);
+  return showDiff(file);
+}
+
+function showPane(file, path, stats, html, keepScroll) {
+  $('#diff-path').textContent = path;
+  $('#diff-stats').innerHTML = stats;
+  $('#diff-actions').innerHTML = diffActionsHtml(file);
+  const body = $('#diff-body');
+  const keep = keepScroll ? body.scrollTop : 0;
+  body.innerHTML = html;
+  body.scrollTop = keep;
+  $('#diff-view').hidden = false;
+  document.querySelectorAll('#detail .f-row').forEach((r) => r.classList.toggle('sel', r.dataset.path === file.path && r.dataset.mode === file.mode));
 }
 
 async function showDiff(file, silent = false) {
@@ -1143,21 +1422,13 @@ async function showDiff(file, silent = false) {
   try {
     const text = await invoke('get_diff', { repo: S.repo, path: file.path, mode: file.mode, sha: file.sha || null, untracked: !!file.untracked });
     if (S.file !== file) return;
-    const { html, adds, dels } = parseDiff(text);
-    $('#diff-path').textContent = file.path;
-    $('#diff-stats').innerHTML = `<span class="add-c">+${adds}</span> <span class="del-c">−${dels}</span>`;
-    $('#diff-actions').innerHTML =
-      file.mode === 'unstaged'
-        ? '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>'
-        : file.mode === 'staged'
-          ? '<button class="mini" data-diff-do="unstage">Unstage file</button>'
-          : '';
-    const body = $('#diff-body');
-    const keep = silent ? body.scrollTop : 0;
-    body.innerHTML = html;
-    body.scrollTop = keep;
-    $('#diff-view').hidden = false;
-    document.querySelectorAll('#detail .f-row').forEach((r) => r.classList.toggle('sel', r.dataset.path === file.path && r.dataset.mode === file.mode));
+    // Keep picked lines only while the diff they refer to is unchanged.
+    if (text !== S.diffText) S.lineSel.clear();
+    S.diffText = text;
+    S.diffModel = parseDiff(text);
+    S.lineAnchor = null;
+    const m = S.diffModel;
+    showPane(file, file.path, `<span class="add-c">+${m.adds}</span> <span class="del-c">−${m.dels}</span>`, diffHtml(m, file), silent);
   } catch (e) {
     if (!silent) toast(String(e), 'err');
   }
@@ -1165,18 +1436,79 @@ async function showDiff(file, silent = false) {
 
 function closeDiff() {
   S.file = null;
+  S.diffModel = null;
+  S.diffText = null;
+  S.lineSel.clear();
   $('#diff-view').hidden = true;
   document.querySelectorAll('#detail .f-row.sel').forEach((r) => r.classList.remove('sel'));
 }
+
+function refreshPicked() {
+  document.querySelectorAll('#diff-body .dl[data-k]').forEach((el) => el.classList.toggle('picked', S.lineSel.has(el.dataset.k)));
+  if (S.file) $('#diff-actions').innerHTML = diffActionsHtml(S.file);
+}
+
+// Pick changed lines by clicking their gutter (⇧-click for a range); the text stays selectable.
+$('#diff-body').addEventListener('click', (e) => {
+  const hb = e.target.closest('[data-hunk]');
+  if (hb) {
+    const hi = +hb.closest('.hunk').dataset.h;
+    const mode = hb.dataset.hunk;
+    return applyPicked(mode, (h) => h === hi, 'this hunk');
+  }
+  const row = e.target.closest('.picking .dl[data-k]');
+  if (!row || e.target.closest('.t')) return;
+  const keys = [...document.querySelectorAll('#diff-body .dl[data-k]')].map((el) => el.dataset.k);
+  const k = row.dataset.k;
+  if (e.shiftKey && S.lineAnchor && keys.includes(S.lineAnchor)) {
+    const [a, b] = [keys.indexOf(S.lineAnchor), keys.indexOf(k)].sort((x, y) => x - y);
+    keys.slice(a, b + 1).forEach((x) => S.lineSel.add(x));
+  } else {
+    S.lineSel.has(k) ? S.lineSel.delete(k) : S.lineSel.add(k);
+    S.lineAnchor = k;
+  }
+  refreshPicked();
+});
 
 $('#diff-close').addEventListener('click', closeDiff);
 $('#diff-actions').addEventListener('click', (e) => {
   const b = e.target.closest('[data-diff-do]');
   if (!b || !S.file) return;
   const f = S.file;
+  const act = b.dataset.diffDo;
+  const picked = (h, l) => S.lineSel.has(`${h}:${l}`);
+  const n = S.lineSel.size;
+  const what = `${n} line${n === 1 ? '' : 's'}`;
+  if (act === 'lines-stage') return applyPicked('stage', picked, what);
+  if (act === 'lines-unstage') return applyPicked('unstage', picked, what);
+  if (act === 'lines-discard') return applyPicked('discard', picked, what);
+  if (act === 'lines-clear') {
+    S.lineSel.clear();
+    return refreshPicked();
+  }
+  if (act === 'back') return openFileView(f.back);
+  if (act === 'blame') return openFileView({ mode: 'blame', path: f.path, rev: f.mode === 'commit' ? f.sha : null, back: f });
+  if (act === 'history') return openFileView({ mode: 'history', path: f.path, back: f });
   const status = f.untracked ? '?' : '';
-  if (b.dataset.diffDo !== 'discard') closeDiff();
-  fileAction(b.dataset.diffDo, f.path, status);
+  if (act !== 'discard') closeDiff();
+  fileAction(act, f.path, status);
+});
+
+// File rows: history / blame / open from the context menu.
+$('#detail').addEventListener('contextmenu', (e) => {
+  const row = e.target.closest('.f-row');
+  if (!row) return;
+  e.preventDefault();
+  const { path, mode, status } = row.dataset;
+  const sha = mode === 'commit' ? S.selected : null;
+  const isNew = status === '?' || (mode === 'staged' && status === 'A');
+  showMenu(e, [
+    !isNew && status !== 'D' && ['Blame', () => openFileView({ mode: 'blame', path, rev: sha })],
+    !isNew && ['File history', () => openFileView({ mode: 'history', path })],
+    null,
+    status !== 'D' && ['Open file', () => invoke('reveal', { repo: S.repo, target: 'file', path }).catch((err) => toast(String(err), 'err'))],
+    ['Copy path', () => navigator.clipboard.writeText(path).then(() => toast('Path copied'))],
+  ]);
 });
 
 // ------------------------------------------------------------------ context menu

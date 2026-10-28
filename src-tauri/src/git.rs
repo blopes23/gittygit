@@ -44,6 +44,11 @@ pub struct Ctx {
 
 /// Run git in `cwd` (passed with `-C`) and return stdout when the exit code is in `ok_codes`.
 pub fn exec(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx) -> R<String> {
+    exec_with(cwd, args, ok_codes, ctx, &[], None)
+}
+
+/// `exec` with extra environment variables and optional stdin.
+pub fn exec_with(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx, env: &[(&str, &str)], stdin: Option<&[u8]>) -> R<String> {
     let mut cmd = Command::new(git_bin());
     cmd.arg("-C").arg(cwd);
     if let Some((name, email)) = &ctx.identity {
@@ -69,7 +74,18 @@ pub fn exec(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx) -> R<String> 
         }
         None => {}
     }
-    let out = cmd.output().map_err(|e| format!("failed to run git: {e}"))?;
+    cmd.envs(env.iter().copied());
+    let out = match stdin {
+        None => cmd.output(),
+        Some(input) => {
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("failed to run git: {e}"))?;
+            child.stdin.take().expect("piped stdin").write_all(input).map_err(|e| e.to_string())?;
+            child.wait_with_output()
+        }
+    }
+    .map_err(|e| format!("failed to run git: {e}"))?;
     let code = out.status.code().unwrap_or(-1);
     if ok_codes.contains(&code) {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -496,4 +512,393 @@ pub fn read_conflict(repo: &str, path: &str) -> R<ConflictFile> {
 pub fn write_conflict(repo: &str, path: &str, content: &str) -> R<()> {
     let full = conflict_path(repo, path)?;
     std::fs::write(full, content).map_err(|e| e.to_string())
+}
+
+
+// ---------------------------------------------------------------- partial staging
+
+/// Apply a patch built from selected hunks/lines: "stage" to the index, "unstage" (reverse,
+/// index) or "discard" (reverse, working tree). `--recount` lets the UI skip header counts.
+pub fn apply_patch(repo: &str, patch: &str, mode: &str, ctx: &Ctx) -> R<()> {
+    let args: &[&str] = match mode {
+        "stage" => &["apply", "--cached", "--recount", "--whitespace=nowarn", "-"],
+        "unstage" => &["apply", "--cached", "--reverse", "--recount", "--whitespace=nowarn", "-"],
+        "discard" => &["apply", "--reverse", "--recount", "--whitespace=nowarn", "-"],
+        _ => return Err(format!("unknown patch mode {mode}")),
+    };
+    exec_with(repo, args, &[0], ctx, &[], Some(patch.as_bytes())).map(|_| ())
+}
+
+// ---------------------------------------------------------------- file history & blame
+
+#[derive(Serialize)]
+pub struct HistoryEntry {
+    pub sha: String,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub subject: String,
+    /// The file's path in this commit (differs from the requested path before a rename).
+    pub path: String,
+    pub status: String,
+}
+
+pub fn file_history(repo: &str, path: &str, limit: usize) -> R<Vec<HistoryEntry>> {
+    let n = format!("-n{limit}");
+    let out = run(
+        repo,
+        &["-c", "core.quotePath=false", "log", "--follow", &n, "--format=%x1e%H%x1f%an%x1f%ae%x1f%at%x1f%s", "--name-status", "--", path],
+    )?;
+    let mut cur = path.to_string();
+    let mut list = vec![];
+    for rec in out.split(RS).filter(|r| !r.trim().is_empty()) {
+        let mut lines = rec.lines();
+        let f: Vec<&str> = lines.next().unwrap_or_default().split(US).collect();
+        if f.len() < 5 {
+            continue;
+        }
+        // "M\tpath" or "R100\told\tnew"; merges list nothing, so they keep the newer path.
+        let parts: Vec<&str> = lines.filter(|l| l.contains('\t')).last().map(|l| l.split('\t').collect()).unwrap_or_default();
+        let status: String = parts.first().map(|p| p.chars().take(1).collect()).unwrap_or_default();
+        if let Some(p) = parts.last() {
+            cur = p.to_string();
+        }
+        list.push(HistoryEntry {
+            sha: f[0].into(),
+            author: f[1].into(),
+            email: f[2].into(),
+            time: f[3].parse().unwrap_or(0),
+            subject: f[4].into(),
+            path: cur.clone(),
+            status,
+        });
+        // Older commits (before a rename) live under the old name.
+        if parts.len() == 3 {
+            cur = parts[1].to_string();
+        }
+    }
+    Ok(list)
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct BlameCommit {
+    pub sha: String,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+    pub summary: String,
+}
+
+#[derive(Serialize, Default)]
+pub struct Blame {
+    pub commits: Vec<BlameCommit>,
+    /// Per line: index into `commits`.
+    pub owner: Vec<usize>,
+    pub text: Vec<String>,
+}
+
+fn is_sha(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `git blame --porcelain` at `rev` (working tree when None).
+pub fn blame(repo: &str, path: &str, rev: Option<&str>) -> R<Blame> {
+    let mut args = vec!["blame", "--porcelain"];
+    if let Some(r) = rev {
+        args.push(r);
+    }
+    args.extend(["--", path]);
+    let out = run(repo, &args)?;
+    let mut b = Blame::default();
+    let mut index = std::collections::HashMap::new();
+    let mut cur = 0usize;
+    for line in out.lines() {
+        if let Some(t) = line.strip_prefix('\t') {
+            b.owner.push(cur);
+            b.text.push(t.to_string());
+            continue;
+        }
+        let (key, val) = line.split_once(' ').unwrap_or((line, ""));
+        if is_sha(key) {
+            cur = *index.entry(key.to_string()).or_insert_with(|| {
+                b.commits.push(BlameCommit { sha: key.to_string(), ..Default::default() });
+                b.commits.len() - 1
+            });
+            continue;
+        }
+        let c = &mut b.commits[cur];
+        match key {
+            "author" => c.author = val.to_string(),
+            "author-mail" => c.email = val.trim_matches(|ch| ch == '<' || ch == '>').to_string(),
+            "author-time" => c.time = val.parse().unwrap_or(0),
+            "summary" => c.summary = val.to_string(),
+            _ => {}
+        }
+    }
+    Ok(b)
+}
+
+// ---------------------------------------------------------------- interactive rebase
+
+#[derive(Serialize)]
+pub struct RebaseCommit {
+    pub sha: String,
+    pub author: String,
+    pub time: i64,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct RebasePlan {
+    /// Oldest first, as in git's todo list.
+    pub commits: Vec<RebaseCommit>,
+    pub has_merges: bool,
+}
+
+pub fn rebase_plan(repo: &str, base: &str) -> R<RebasePlan> {
+    if run(repo, &["merge-base", "--is-ancestor", base, "HEAD"]).is_err() {
+        return Err("That commit isn't part of the current branch's history.".into());
+    }
+    let range = format!("{base}..HEAD");
+    let out = run(repo, &["log", "--reverse", "--no-merges", "--format=%H%x1f%an%x1f%at%x1f%B%x1e", &range])?;
+    let commits = out
+        .split(RS)
+        .filter_map(|rec| {
+            let f: Vec<&str> = rec.trim_start_matches('\n').splitn(4, US).collect();
+            (f.len() == 4).then(|| RebaseCommit {
+                sha: f[0].into(),
+                author: f[1].into(),
+                time: f[2].parse().unwrap_or(0),
+                message: f[3].trim_end().into(),
+            })
+        })
+        .collect();
+    let has_merges = !run(repo, &["rev-list", "--merges", "-n1", &range])?.trim().is_empty();
+    Ok(RebasePlan { commits, has_merges })
+}
+
+#[derive(serde::Deserialize)]
+pub struct RebaseStep {
+    pub action: String,
+    pub sha: String,
+    pub message: Option<String>,
+}
+
+/// Run `git rebase -i <base>` with a todo list prepared by the UI (GIT_SEQUENCE_EDITOR copies it
+/// in). Rewords become `pick` + `exec git commit --amend -F <file>`, so new messages need no editor.
+pub fn interactive_rebase(repo: &str, base: &str, steps: &[RebaseStep], ctx: &Ctx) -> R<String> {
+    let plan = rebase_plan(repo, base)?;
+    if plan.has_merges {
+        return Err("The range contains merge commits; interactive rebase here would flatten them.".into());
+    }
+    let mut want: Vec<&str> = plan.commits.iter().map(|c| c.sha.as_str()).collect();
+    let mut got: Vec<&str> = steps.iter().map(|s| s.sha.as_str()).collect();
+    want.sort_unstable();
+    got.sort_unstable();
+    if want != got {
+        return Err("The branch changed since the rebase was planned; open it again.".into());
+    }
+    match steps.iter().find(|s| s.action != "drop") {
+        Some(s) if s.action == "squash" || s.action == "fixup" => {
+            return Err("The oldest kept commit can't be squashed: there's nothing before it to squash into.".into())
+        }
+        None => return Err("Every commit is dropped; use a reset instead.".into()),
+        _ => {}
+    }
+    let git_dir = run(repo, &["rev-parse", "--absolute-git-dir"])?.trim().to_string();
+    let dir = Path::new(&git_dir).join("gittygit-rebase");
+    let dir_s = dir.to_string_lossy().into_owned();
+    if dir_s.contains('\'') {
+        return Err("unsupported repository path".into());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut todo = String::new();
+    for (i, s) in steps.iter().enumerate() {
+        if !is_sha(&s.sha) {
+            return Err(format!("bad commit id {}", s.sha));
+        }
+        match s.action.as_str() {
+            "pick" | "squash" | "fixup" | "drop" => todo.push_str(&format!("{} {}\n", s.action, s.sha)),
+            "reword" => {
+                let msg = s.message.as_deref().map(str::trim).filter(|m| !m.is_empty()).ok_or("A reworded commit needs a message.")?;
+                let file = dir.join(format!("msg-{i}"));
+                std::fs::write(&file, format!("{msg}\n")).map_err(|e| e.to_string())?;
+                todo.push_str(&format!("pick {}\nexec git commit --amend --allow-empty --no-verify -q -F '{}'\n", s.sha, file.to_string_lossy()));
+            }
+            a => return Err(format!("unknown rebase action {a}")),
+        }
+    }
+    let todo_path = dir.join("todo");
+    std::fs::write(&todo_path, todo).map_err(|e| e.to_string())?;
+    let editor = format!("cp '{}'", todo_path.to_string_lossy());
+    exec_with(repo, &["rebase", "-i", base], &[0], ctx, &[("GIT_SEQUENCE_EDITOR", &editor)], None)
+}
+
+// ---------------------------------------------------------------- undo snapshots
+
+/// Working-tree content of one file, stored as a git blob so a discard can be undone.
+#[derive(Serialize, serde::Deserialize)]
+pub struct FileSnap {
+    pub path: String,
+    /// None: the file didn't exist (restoring deletes it).
+    pub blob: Option<String>,
+    pub mode: Option<u32>,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+pub struct Snapshot {
+    pub files: Vec<FileSnap>,
+    /// Index tree (`git write-tree`) when the whole index should come back too.
+    pub index: Option<String>,
+}
+
+fn safe_rel(path: &str) -> R<()> {
+    let p = Path::new(path);
+    if path.is_empty() || p.is_absolute() || p.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return Err(format!("bad path {path}"));
+    }
+    Ok(())
+}
+
+pub fn snapshot(repo: &str, paths: &[String], with_index: bool) -> R<Snapshot> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut files = vec![];
+    for path in paths {
+        safe_rel(path)?;
+        let full = Path::new(repo).join(path);
+        let meta = std::fs::symlink_metadata(&full).ok().filter(|m| m.is_file());
+        let blob = match &meta {
+            Some(_) => Some(run(repo, &["hash-object", "-w", "--no-filters", "--", path])?.trim().to_string()),
+            None => None,
+        };
+        files.push(FileSnap { path: path.clone(), blob, mode: meta.map(|m| m.permissions().mode()) });
+    }
+    // write-tree fails while conflicts are unresolved; then only the files come back.
+    let index = if with_index { run(repo, &["write-tree"]).ok().map(|s| s.trim().to_string()) } else { None };
+    Ok(Snapshot { files, index })
+}
+
+pub fn restore(repo: &str, snap: &Snapshot, ctx: &Ctx) -> R<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(tree) = &snap.index {
+        if !is_sha(tree) {
+            return Err("bad tree id".into());
+        }
+        exec(repo, &["read-tree", tree], &[0], ctx)?;
+    }
+    for f in &snap.files {
+        safe_rel(&f.path)?;
+        let full = Path::new(repo).join(&f.path);
+        match &f.blob {
+            None => {
+                if full.is_file() {
+                    std::fs::remove_file(&full).map_err(|e| e.to_string())?;
+                }
+            }
+            Some(blob) => {
+                if !is_sha(blob) {
+                    return Err("bad blob id".into());
+                }
+                let mut cmd = Command::new(git_bin());
+                let out = cmd.arg("-C").arg(repo).args(["cat-file", "blob", blob]).output().map_err(|e| e.to_string())?;
+                if !out.status.success() {
+                    return Err(format!("snapshot of {} is gone", f.path));
+                }
+                if let Some(dir) = full.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&full, &out.stdout).map_err(|e| e.to_string())?;
+                if let Some(mode) = f.mode {
+                    let _ = std::fs::set_permissions(&full, std::fs::Permissions::from_mode(mode));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo() -> String {
+        let dir = std::env::temp_dir().join(format!("gittygit-test-{}-{}", std::process::id(), rand_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = dir.to_string_lossy().into_owned();
+        run(&r, &["init", "-q", "-b", "main"]).unwrap();
+        run(&r, &["config", "user.name", "T"]).unwrap();
+        run(&r, &["config", "user.email", "t@example.com"]).unwrap();
+        r
+    }
+
+    fn rand_suffix() -> u128 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    }
+
+    fn commit(r: &str, file: &str, text: &str, msg: &str) -> String {
+        std::fs::write(Path::new(r).join(file), text).unwrap();
+        run(r, &["add", "-A"]).unwrap();
+        run(r, &["commit", "-q", "-m", msg]).unwrap();
+        run(r, &["rev-parse", "HEAD"]).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn rebase_blame_history_snapshot() {
+        let r = repo();
+        let a = commit(&r, "f", "1\n", "A");
+        let b = commit(&r, "f", "1\n2\n", "B");
+        let c = commit(&r, "g", "x\n", "C");
+        let d = commit(&r, "f", "1\n2\n3\n", "D");
+
+        let plan = rebase_plan(&r, &a).unwrap();
+        assert_eq!(plan.commits.iter().map(|c| c.sha.as_str()).collect::<Vec<_>>(), [&b, &c, &d]);
+        assert!(!plan.has_merges);
+
+        let hist = file_history(&r, "f", 10).unwrap();
+        assert_eq!(hist.iter().map(|h| h.subject.as_str()).collect::<Vec<_>>(), ["D", "B", "A"]);
+
+        let bl = blame(&r, "f", None).unwrap();
+        assert_eq!(bl.text, ["1", "2", "3"]);
+        assert_eq!(bl.commits[bl.owner[2]].summary, "D");
+
+        let step = |action: &str, sha: &str, message: Option<&str>| RebaseStep {
+            action: action.into(),
+            sha: sha.into(),
+            message: message.map(String::from),
+        };
+        let bad = interactive_rebase(&r, &a, &[step("fixup", &b, None), step("pick", &c, None), step("pick", &d, None)], &Ctx::default());
+        assert!(bad.is_err());
+        interactive_rebase(
+            &r,
+            &a,
+            &[step("reword", &b, Some("B renamed\n\nbody")), step("drop", &c, None), step("fixup", &d, None)],
+            &Ctx::default(),
+        )
+        .unwrap();
+        let log = run(&r, &["log", "--format=%B%x1e", &format!("{a}..HEAD")]).unwrap();
+        assert_eq!(log.split('\u{1e}').filter(|s| !s.trim().is_empty()).count(), 1);
+        assert!(log.starts_with("B renamed\n\nbody"));
+        assert_eq!(std::fs::read_to_string(Path::new(&r).join("f")).unwrap(), "1\n2\n3\n");
+        assert!(!Path::new(&r).join("g").exists());
+
+        // Discard + undo restores the working-tree bytes and a deleted untracked file.
+        std::fs::write(Path::new(&r).join("f"), "changed\n").unwrap();
+        std::fs::write(Path::new(&r).join("new.txt"), "untracked\n").unwrap();
+        let snap = snapshot(&r, &["f".into(), "new.txt".into()], true).unwrap();
+        run(&r, &["checkout", "--", "f"]).unwrap();
+        std::fs::remove_file(Path::new(&r).join("new.txt")).unwrap();
+        restore(&r, &snap, &Ctx::default()).unwrap();
+        assert_eq!(std::fs::read_to_string(Path::new(&r).join("f")).unwrap(), "changed\n");
+        assert_eq!(std::fs::read_to_string(Path::new(&r).join("new.txt")).unwrap(), "untracked\n");
+        assert!(snapshot(&r, &["../x".into()], false).is_err());
+
+        // Stage one hunk through a patch.
+        let patch = run(&r, &["diff", "--", "f"]).unwrap();
+        apply_patch(&r, &patch, "stage", &Ctx::default()).unwrap();
+        assert!(run(&r, &["diff", "--cached", "--", "f"]).unwrap().contains("+changed"));
+        apply_patch(&r, &patch, "unstage", &Ctx::default()).unwrap();
+        assert!(run(&r, &["diff", "--cached"]).unwrap().is_empty());
+        std::fs::remove_dir_all(&r).unwrap();
+    }
 }

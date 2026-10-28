@@ -202,7 +202,7 @@ fn get_diff(repo: String, path: String, mode: String, sha: Option<String>, untra
 fn git_run(profile_id: String, repo: String, args: Vec<String>) -> R<String> {
     const ALLOWED: &[&str] = &[
         "add", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "fetch", "merge", "pull", "push",
-        "rebase", "reset", "restore", "revert", "rm", "stash", "switch", "tag",
+        "rebase", "reset", "restore", "rev-parse", "revert", "rm", "stash", "switch", "tag",
     ];
     let sub = args.first().map(String::as_str).unwrap_or_default();
     if !ALLOWED.contains(&sub) {
@@ -231,6 +231,49 @@ fn resolve_conflict(profile_id: String, repo: String, path: String, content: Str
     let profile = store.for_repo(&profile_id, &repo)?;
     git::write_conflict(&repo, &path, &content)?;
     git::exec(&repo, &["add", "--", &path], &[0], &profiles::ctx(profile)).map(|_| ())
+}
+
+/// Stage, unstage or discard selected hunks/lines (a patch built by the diff view).
+#[tauri::command(async)]
+fn apply_patch(profile_id: String, repo: String, patch: String, mode: String) -> R<()> {
+    let store = profiles::load();
+    let profile = store.for_repo(&profile_id, &repo)?;
+    git::apply_patch(&repo, &patch, &mode, &profiles::ctx(profile))
+}
+
+#[tauri::command(async)]
+fn file_history(repo: String, path: String) -> R<Vec<git::HistoryEntry>> {
+    git::file_history(&repo, &path, 1000)
+}
+
+#[tauri::command(async)]
+fn blame(repo: String, path: String, rev: Option<String>) -> R<git::Blame> {
+    git::blame(&repo, &path, rev.as_deref().filter(|r| !r.is_empty()))
+}
+
+#[tauri::command(async)]
+fn rebase_plan(repo: String, base: String) -> R<git::RebasePlan> {
+    git::rebase_plan(&repo, &base)
+}
+
+#[tauri::command(async)]
+fn interactive_rebase(profile_id: String, repo: String, base: String, steps: Vec<git::RebaseStep>) -> R<String> {
+    let store = profiles::load();
+    let profile = store.for_repo(&profile_id, &repo)?;
+    git::interactive_rebase(&repo, &base, &steps, &profiles::ctx(profile))
+}
+
+/// Save the working-tree content of `paths` (and optionally the index) before a discard.
+#[tauri::command(async)]
+fn snapshot_files(repo: String, paths: Vec<String>, index: Option<bool>) -> R<git::Snapshot> {
+    git::snapshot(&repo, &paths, index.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn restore_files(profile_id: String, repo: String, snapshot: git::Snapshot) -> R<()> {
+    let store = profiles::load();
+    let profile = store.for_repo(&profile_id, &repo)?;
+    git::restore(&repo, &snapshot, &profiles::ctx(profile))
 }
 
 #[tauri::command(async)]
@@ -296,6 +339,22 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "get_diff" => {
             let sha = Some(s("sha")).filter(|x| !x.is_empty());
             json!(get_diff(repo, s("path"), s("mode"), sha, get("untracked").and_then(|v| v.as_bool()))?)
+        }
+        "apply_patch" => json!(apply_patch(s("profile_id"), repo, s("patch"), s("mode"))?),
+        "file_history" => to_value(file_history(repo, s("path"))?).unwrap(),
+        "blame" => to_value(blame(repo, s("path"), Some(s("rev")))?).unwrap(),
+        "rebase_plan" => to_value(rebase_plan(repo, s("base"))?).unwrap(),
+        "interactive_rebase" => {
+            let steps = serde_json::from_value(get("steps").unwrap_or_default()).map_err(|e| e.to_string())?;
+            json!(interactive_rebase(s("profile_id"), repo, s("base"), steps)?)
+        }
+        "snapshot_files" => {
+            let paths = serde_json::from_value(get("paths").unwrap_or_default()).map_err(|e| e.to_string())?;
+            to_value(snapshot_files(repo, paths, get("index").and_then(|v| v.as_bool()))?).unwrap()
+        }
+        "restore_files" => {
+            let snap = serde_json::from_value(get("snapshot").unwrap_or_default()).map_err(|e| e.to_string())?;
+            json!(restore_files(s("profile_id"), repo, snap)?)
         }
         "git_run" => {
             let argv = serde_json::from_value(get("args").unwrap_or_default()).map_err(|e| e.to_string())?;
@@ -365,6 +424,13 @@ fn main() {
             get_repo_state,
             read_conflict,
             resolve_conflict,
+            apply_patch,
+            file_history,
+            blame,
+            rebase_plan,
+            interactive_rebase,
+            snapshot_files,
+            restore_files,
             reveal,
             updater::check_update,
             updater::install_update

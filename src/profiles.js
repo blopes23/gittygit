@@ -620,6 +620,9 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     $('#search').focus();
     $('#search').select();
+  } else if (e.metaKey && !e.shiftKey && e.key === 'z' && S.undo && !e.target.closest?.('input, textarea, [contenteditable]') && !document.querySelector('dialog[open]')) {
+    e.preventDefault();
+    runUndo();
   } else if (e.metaKey && e.key === 'r' && S.repo) {
     e.preventDefault();
     busy(refresh);
