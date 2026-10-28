@@ -1065,10 +1065,22 @@ function fileRow(f, mode, actions = '') {
   const title = f.orig ? `${f.orig} → ${f.path}` : f.path;
   return `<div class="f-row${sel}" data-path="${esc(f.path)}" data-mode="${mode}" data-status="${esc(f.status)}" data-xy="${esc(f.conflict || '')}" title="${esc(title)}">
     <span class="st st-${esc(f.status)}">${esc(f.status === '?' ? 'A' : f.status)}</span>
-    <span class="p"><span><span class="dir">${esc(dir)}</span>${esc(base)}</span></span>
+    <span class="p"><span class="ell">…</span><span class="dir"><span>${esc(dir)}</span></span><span class="base">${esc(base)}</span></span>
     ${f.conflict ? `<small class="cx">${esc(CONFLICT_KIND[f.conflict] || f.conflict)}</small>` : ''}
     <span class="acts">${actions}</span></div>`;
 }
+
+/**
+ * File rows keep the file name whole and clip the folder path from the left; a separate "…"
+ * shows only when the folder is actually clipped (CSS ellipsis in RTL boxes overlaps the text).
+ */
+function markCutPaths() {
+  $('#detail').querySelectorAll('.f-row .p').forEach((p) => {
+    const d = p.querySelector('.dir');
+    p.classList.toggle('cut', d.scrollWidth > d.clientWidth + 1);
+  });
+}
+new ResizeObserver(() => markCutPaths()).observe($('#detail'));
 
 function renderDetail() {
   if (!S.repo || !S.selected) {
@@ -1140,6 +1152,7 @@ function renderWip() {
   html += `<div class="f-section-h">Staged Files (${st.staged.length})<span class="spacer"></span>${st.staged.length ? '<button class="mini" data-do="unstage-all">Unstage all</button>' : ''}</div>`;
   html += st.staged.length ? st.staged.map((f) => fileRow(f, 'staged', unstageBtn)).join('') : '<div class="f-empty">No staged changes</div>';
   $('#wip-files').innerHTML = html;
+  markCutPaths();
   // Rebase/cherry-pick/revert commit through Continue; a manual commit would add an extra one.
   const op = S.op?.kind;
   $('.commit-box').style.display = op && op !== 'merge' ? 'none' : '';
@@ -1273,6 +1286,7 @@ async function renderCommit(sha) {
       <div class="f-section-h">${c.files.length} changed file${c.files.length === 1 ? '' : 's'}${c.parents.length > 1 ? ' <small>(vs first parent)</small>' : ''}</div>
       ${c.files.map((f) => fileRow(f, 'commit')).join('') || '<div class="f-empty">No file changes</div>'}
     </div>`;
+  markCutPaths();
 }
 
 // ------------------------------------------------------------------ diff view
