@@ -32,6 +32,12 @@ struct GraphPayload {
     head_sha: Option<String>,
     head_branch: Option<String>,
     dirty: bool,
+    /// More commits exist beyond `limit` (the UI loads them when scrolled to the end).
+    has_more: bool,
+    /// Time spent reading history and laying it out, and whether git's commit-graph file
+    /// exists; together they decide whether to suggest writing one.
+    load_ms: u64,
+    commit_graph: bool,
 }
 
 #[tauri::command(async)]
@@ -162,7 +168,11 @@ fn is_dirty(st: &git::Status, op: &git::RepoState) -> bool {
 }
 
 fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
-    let mut commits = git::log(repo, limit)?;
+    let started = std::time::Instant::now();
+    // One extra commit tells whether there is more history than `limit`.
+    let mut commits = git::log(repo, limit + 1)?;
+    let has_more = commits.len() > limit;
+    commits.truncate(limit);
     let (head_sha, head_branch) = git::head(repo);
     if dirty {
         // Synthetic work-in-progress node on top of HEAD, like GitKraken's "// WIP" row.
@@ -180,7 +190,9 @@ fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
         );
     }
     let (rows, max_lanes) = graph::layout(commits);
-    Ok(GraphPayload { rows, max_lanes, head_sha, head_branch, dirty })
+    let load_ms = started.elapsed().as_millis() as u64;
+    let commit_graph = git::has_commit_graph(repo);
+    Ok(GraphPayload { rows, max_lanes, head_sha, head_branch, dirty, has_more, load_ms, commit_graph })
 }
 
 #[derive(Serialize)]
@@ -197,13 +209,35 @@ struct Snapshot {
 /// Everything a refresh needs in one call. The commit graph (the expensive part: `git log` of
 /// thousands of commits plus layout) is only rebuilt when refs, HEAD or the WIP row changed.
 #[tauri::command(async)]
-fn get_snapshot(repo: String, known_key: Option<String>) -> R<Snapshot> {
+fn get_snapshot(repo: String, known_key: Option<String>, limit: Option<usize>) -> R<Snapshot> {
     let status = git::status(&repo)?;
     let op = git::repo_state(&repo);
     let dirty = is_dirty(&status, &op);
-    let key = git::graph_key(&repo, dirty)?;
-    let graph = if known_key.as_deref() == Some(key.as_str()) { None } else { Some(build_graph(&repo, 5000, dirty)?) };
+    let limit = limit.unwrap_or(5000).clamp(1, MAX_COMMITS);
+    let key = format!("{}-{limit}", git::graph_key(&repo, dirty)?);
+    let graph = if known_key.as_deref() == Some(key.as_str()) { None } else { Some(build_graph(&repo, limit, dirty)?) };
     Ok(Snapshot { key, graph, status, refs: git::refs(&repo)?, op })
+}
+
+/// Most commits the graph will load (search and scrolling raise the limit up to this).
+const MAX_COMMITS: usize = 200_000;
+
+/// Commits matching `query` anywhere in history, with their row position in the graph order.
+#[tauri::command(async)]
+fn search_commits(repo: String, query: String) -> R<Vec<git::SearchHit>> {
+    git::search(&repo, &query, 200)
+}
+
+/// Write git's commit-graph file (and optionally keep it updated on fetch) to speed up history.
+#[tauri::command(async)]
+fn write_commit_graph(profile_id: String, repo: String, keep_updated: bool) -> R<()> {
+    let store = profiles::load();
+    let ctx = profiles::ctx(store.for_repo(&profile_id, &repo)?);
+    git::exec(&repo, &["commit-graph", "write", "--reachable", "--changed-paths"], &[0], &ctx)?;
+    if keep_updated {
+        git::exec(&repo, &["config", "fetch.writeCommitGraph", "true"], &[0], &ctx)?;
+    }
+    Ok(())
 }
 
 /// Fast-forward several local branches from their upstreams, one fetch per remote.
@@ -373,7 +407,12 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "get_graph" => to_value(get_graph(repo, None)?).unwrap(),
         "get_snapshot" => {
             let known = Some(s("known_key")).filter(|k| !k.is_empty());
-            to_value(get_snapshot(repo, known)?).unwrap()
+            let limit = get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+            to_value(get_snapshot(repo, known, limit)?).unwrap()
+        }
+        "search_commits" => to_value(search_commits(repo, s("query"))?).unwrap(),
+        "write_commit_graph" => {
+            json!(write_commit_graph(s("profile_id"), repo, get("keep_updated").and_then(|v| v.as_bool()).unwrap_or(false))?)
         }
         "fast_forward" => {
             let branches = serde_json::from_value(get("branches").unwrap_or_default()).map_err(|e| e.to_string())?;
@@ -463,6 +502,8 @@ fn main() {
             clone_repo,
             get_graph,
             get_snapshot,
+            search_commits,
+            write_commit_graph,
             fast_forward,
             get_status,
             get_refs,

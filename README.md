@@ -11,7 +11,7 @@ See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering n
   - expected remote owners per profile: warns when a repo is opened or pushed under the wrong profile
   - optional per-repo "use profile in terminal git" writes `core.sshCommand` + `user.*` to that repo's `.git/config`
   - stored in `~/Library/Application Support/dev.gittygit.desktop/profiles.json` (key paths only, never key contents)
-- Commit graph of all branches (lane layout in Rust, virtualized rows, branch/tag pills, WIP node)
+- Commit graph of all branches (lane layout in Rust, virtualized rows, branch/tag pills, WIP node); older history loads in pages of 5000 as you scroll
 - Sidebar: local / remote branches with ahead/behind, tags, stashes
 - Pull into a branch without checking it out (right-click → "Pull … (fast-forward)", works on multi-selection too)
 - Multi-select local branches (⌘-click, ⇧-click, ⌘A) and delete them in one go (⌫ or right-click); unmerged ones get a single force-delete prompt
@@ -20,7 +20,7 @@ See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering n
 - Conflict resolution for merges, rebases, cherry-picks, reverts and stash pops: side-by-side ours/theirs per
   conflict with ours / theirs / both / hand-edited results, keep-or-delete for deleted files, whole-version pick for
   binaries, and a banner to continue, skip (rebase) or abort the operation
-- Commit details with changed files; unified diff viewer
+- Commit details with changed files; unified diff viewer (big diffs render only the visible rows)
 - File history (follows renames) and blame, from a file's right-click menu or the diff header; click a commit to see its change
 - Interactive rebase (right-click a commit → "Interactive rebase … from here"): reorder, reword, squash, fixup, drop
 - Force push with lease (offered when a push is rejected after an amend/rebase; refuses to overwrite commits you haven't integrated)
@@ -28,7 +28,8 @@ See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering n
 - Toolbar: pull, push (sets upstream on first push), fetch, branch, stash, pop, open in Terminal/Finder
 - Context menus: checkout, merge, rebase, cherry-pick, revert, reset soft/mixed/hard, tag, delete branch
 - Live refresh via FSEvents (`notify`) when files or refs change; changes git ignores (build output, `node_modules`) don't trigger it, and the commit graph is only reloaded when refs or HEAD move
-- Find commits by message, author or SHA (⌘F); ⌘O open; ⌘R refresh; ⌘↵ commit
+- Find commits by message, author or SHA (⌘F); ↵ with no match searches the whole history; ⌘O open; ⌘R refresh; ⌘↵ commit
+- Slow repositories get an opt-in to write git's commit-graph file (faster graph, file history and blame)
 
 ## Build
 Requires Rust (`rustup`, host `aarch64-apple-darwin`) and Node.

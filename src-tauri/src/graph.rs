@@ -29,7 +29,7 @@ pub struct Row {
     pub edges: Vec<Edge>,
 }
 
-fn free_slot(lanes: &mut Vec<Option<String>>, avoid: usize) -> usize {
+fn free_slot(lanes: &mut Vec<Option<u32>>, avoid: usize) -> usize {
     match lanes.iter().enumerate().position(|(i, l)| l.is_none() && i != avoid) {
         Some(i) => i,
         None => {
@@ -39,8 +39,25 @@ fn free_slot(lanes: &mut Vec<Option<String>>, avoid: usize) -> usize {
     }
 }
 
+/// Small integer ids for commit hashes, so lanes are copied and compared without touching strings.
+#[derive(Default)]
+struct Ids(std::collections::HashMap<String, u32>);
+
+impl Ids {
+    fn of(&mut self, sha: &str) -> u32 {
+        if let Some(&id) = self.0.get(sha) {
+            return id;
+        }
+        let id = self.0.len() as u32;
+        self.0.insert(sha.to_string(), id);
+        id
+    }
+}
+
 pub fn layout(commits: Vec<RawCommit>) -> (Vec<Row>, usize) {
-    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut ids = Ids::default();
+    // Each lane holds the id of the commit it is waiting to reach.
+    let mut lanes: Vec<Option<u32>> = Vec::new();
     // Colour follows the lane's branch line rather than its index once assigned.
     let mut lane_colors: Vec<u16> = Vec::new();
     let mut next_color: u16 = 0;
@@ -48,21 +65,23 @@ pub fn layout(commits: Vec<RawCommit>) -> (Vec<Row>, usize) {
     let mut rows = Vec::with_capacity(commits.len());
 
     for c in commits {
+        let me = ids.of(&c.sha);
+        let parents: Vec<u32> = c.parents.iter().map(|p| ids.of(p)).collect();
         let before = lanes.clone();
         let before_colors = lane_colors.clone();
 
-        let col = match lanes.iter().position(|l| l.as_deref() == Some(c.sha.as_str())) {
+        let col = match lanes.iter().position(|&l| l == Some(me)) {
             Some(i) => i,
             None => {
                 let i = free_slot(&mut lanes, usize::MAX);
-                lanes[i] = Some(c.sha.clone());
+                lanes[i] = Some(me);
                 i
             }
         };
         if lane_colors.len() < lanes.len() {
             lane_colors.resize(lanes.len(), 0);
         }
-        if before.get(col).and_then(|l| l.as_deref()) != Some(c.sha.as_str()) {
+        if before.get(col).copied().flatten() != Some(me) {
             lane_colors[col] = next_color;
             next_color += 1;
         }
@@ -70,22 +89,22 @@ pub fn layout(commits: Vec<RawCommit>) -> (Vec<Row>, usize) {
 
         // Other lanes waiting on this commit converge into it.
         for (i, l) in lanes.iter_mut().enumerate() {
-            if i != col && l.as_deref() == Some(c.sha.as_str()) {
+            if i != col && *l == Some(me) {
                 *l = None;
             }
         }
 
         let mut parent_cols = Vec::new();
-        lanes[col] = c.parents.first().cloned();
-        if !c.parents.is_empty() {
+        lanes[col] = parents.first().copied();
+        if !parents.is_empty() {
             parent_cols.push(col);
         }
-        for p in c.parents.iter().skip(1) {
-            let i = match lanes.iter().position(|l| l.as_deref() == Some(p.as_str())) {
+        for &p in parents.iter().skip(1) {
+            let i = match lanes.iter().position(|&l| l == Some(p)) {
                 Some(i) => i,
                 None => {
                     let i = free_slot(&mut lanes, col);
-                    lanes[i] = Some(p.clone());
+                    lanes[i] = Some(p);
                     if lane_colors.len() < lanes.len() {
                         lane_colors.resize(lanes.len(), 0);
                     }
@@ -103,9 +122,9 @@ pub fn layout(commits: Vec<RawCommit>) -> (Vec<Row>, usize) {
 
         let mut edges: Vec<Edge> = Vec::new();
         for (j, h) in before.iter().enumerate() {
-            let Some(h) = h else { continue };
+            let Some(h) = *h else { continue };
             let color = before_colors.get(j).copied().unwrap_or(0);
-            if h == &c.sha {
+            if h == me {
                 edges.push([j as u16, TOP as u16, col as u16, MID as u16, color]);
             } else {
                 edges.push([j as u16, TOP as u16, j as u16, BOTTOM as u16, color]);

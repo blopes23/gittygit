@@ -8,6 +8,8 @@ const { listen } = window.__TAURI__.event;
 const ROW_H = 28;
 const LANE_W = 16;
 const LANE_X0 = 12;
+const PAGE = 5000; // commits loaded per page of history
+const MAX_COMMITS = 200000;
 const PALETTE = ['#4fb3d9', '#a46ff0', '#5fc78a', '#ef9a5b', '#ef6b73', '#e6c062', '#4fd1c5', '#f472b6', '#94a3b8', '#84cc16'];
 const laneColor = (i) => PALETTE[i % PALETTE.length];
 
@@ -302,8 +304,13 @@ async function refresh() {
   try {
     const repo = S.repo;
     // The graph comes back only when refs, HEAD or the WIP row changed since `graphKey`.
+    if (S.limitFor !== repo) {
+      S.limit = PAGE;
+      S.limitFor = repo;
+      S.hits = null;
+    }
     const knownKey = S.graph && S.graphFor === repo ? S.graphKey : null;
-    const snap = await invoke('get_snapshot', { repo, knownKey });
+    const snap = await invoke('get_snapshot', { repo, knownKey, limit: S.limit });
     if (repo !== S.repo) return;
     const { status, refs, op } = snap;
     if (snap.graph) {
@@ -332,7 +339,9 @@ async function refresh() {
     if (snap.graph) layoutGraph();
     renderRows();
     renderDetail();
-    if (S.matches.length) runSearch($('#search').value, false);
+    if (S.hits) applyHits();
+    else if (S.matches.length) runSearch($('#search').value, false);
+    if (snap.graph) suggestCommitGraph();
   } catch (e) {
     toast(String(e), 'err');
   } finally {
@@ -349,6 +358,44 @@ function scheduleRefresh() {
   clearTimeout(changeTimer);
   changeTimer = setTimeout(refresh, 150);
 }
+
+// ------------------------------------------------------------------ commit-graph suggestion
+
+/** Slow history on a repo without git's commit-graph file: offer to write one (opt-in). */
+function suggestCommitGraph() {
+  const g = S.graph;
+  const hint = $('#perf-hint');
+  const dismissed = load('kl.cgDismissed', []);
+  const show = g && !g.commit_graph && g.load_ms > 300 && !dismissed.includes(S.repo);
+  hint.hidden = !show;
+  if (!show) return;
+  hint.innerHTML = `<span>History takes <b>${g.load_ms} ms</b> to load here. Git can index it (a “commit-graph” file) to make the graph, file history and blame several times faster.</span>
+    <span class="spacer"></span><button class="mini primary-mini" data-cg="go">Speed up…</button><button class="mini" data-cg="no">Not now</button>`;
+}
+
+$('#perf-hint').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-cg]');
+  if (!b) return;
+  if (b.dataset.cg === 'no') {
+    save('kl.cgDismissed', [...load('kl.cgDismissed', []), S.repo]);
+    $('#perf-hint').hidden = true;
+    return;
+  }
+  const ok = await ask(
+    'Write git\'s commit-graph file for this repository?\n\nIt goes into .git/objects/info and only speeds up reading history; git rebuilds or ignores it as needed. Gittygit also sets fetch.writeCommitGraph so fetches keep it current.',
+    { ok: 'Speed up' },
+  );
+  if (ok !== true) return;
+  const before = S.graph.load_ms;
+  try {
+    await busy(() => invoke('write_commit_graph', { profileId: activeProfile().id, repo: S.repo, keepUpdated: true }));
+  } catch (e) {
+    return toast(explainGitError(String(e)), 'err');
+  }
+  S.graphKey = null;
+  await busy(refresh);
+  toast(`History now loads in ${S.graph.load_ms} ms (was ${before} ms)`, 'ok');
+});
 
 // ------------------------------------------------------------------ toolbar
 
@@ -765,7 +812,7 @@ function layoutGraph() {
   const lanes = Math.max(1, S.graph?.max_lanes || 1);
   S.graphW = Math.max(60, Math.min(320, LANE_X0 * 2 + (lanes - 1) * LANE_W));
   $('#center').style.setProperty('--graph-w', `${S.graphW}px`);
-  $('#graph-spacer').style.height = `${S.rows.length * ROW_H}px`;
+  $('#graph-spacer').style.height = `${(S.rows.length + (S.graph?.has_more ? 1 : 0)) * ROW_H}px`;
 }
 
 const lx = (c) => LANE_X0 + c * LANE_W;
@@ -881,7 +928,23 @@ function renderRows(force = true) {
   renderedRange = key;
   let html = '';
   for (let i = first; i < last; i++) html += rowHtml(S.rows[i], i);
+  if (S.graph?.has_more && last >= total) {
+    html += `<div class="row more" style="top:${total * ROW_H}px"><div class="c-msg">Loading older commits…</div></div>`;
+    loadMore();
+  }
   $('#graph-rows').innerHTML = html || (S.graph && !total ? '<div class="diff-empty">This repository has no commits yet.</div>' : '');
+}
+
+/** Scrolled to the end of the loaded history: load the next page. */
+async function loadMore() {
+  if (S.loadingMore || refreshing || !S.graph?.has_more || S.limit >= MAX_COMMITS) return;
+  S.loadingMore = true;
+  S.limit = Math.min(S.limit + PAGE, MAX_COMMITS);
+  try {
+    await refresh();
+  } finally {
+    S.loadingMore = false;
+  }
 }
 // Render synchronously in the scroll event so fast wheel/trackpad scrolls never paint empty rows.
 $('#graph-scroll').addEventListener('scroll', () => renderRows(false), { passive: true });
@@ -1021,6 +1084,7 @@ $('#graph-scroll').addEventListener('keydown', (e) => {
 
 function runSearch(q, jump = true) {
   q = q.trim().toLowerCase();
+  S.hits = null;
   S.matches = [];
   if (q) {
     S.rows.forEach((r, i) => {
@@ -1029,6 +1093,46 @@ function runSearch(q, jump = true) {
     });
   }
   S.matchSet = new Set(S.matches.map((i) => S.rows[i].sha));
+  const none = !!q && !S.matches.length;
+  $('#search').classList.toggle('nomatch', none);
+  $('#search').title = none ? 'No match in the loaded commits — press ↵ to search all history' : '';
+  if (jump) {
+    S.matchPos = -1;
+    nextMatch();
+  }
+  renderRows();
+}
+
+/**
+ * Search the whole history (message, author, hash) in git, then load enough of the graph to
+ * show the newest match. Matches older than what's loaded appear as you keep scrolling.
+ */
+async function searchAllHistory(q) {
+  q = q.trim();
+  if (!q) return;
+  let hits;
+  try {
+    hits = await busy(() => invoke('search_commits', { repo: S.repo, query: q }));
+  } catch (e) {
+    return toast(String(e), 'err');
+  }
+  if (!hits.length) return toast(`No commit in the whole history matches “${q}”`);
+  const need = hits[0].pos + 1;
+  if (need > MAX_COMMITS) return toast(`The newest match is ${need.toLocaleString()} commits back — more than Gittygit loads.`, 'err');
+  if (need > S.limit) {
+    S.limit = Math.ceil(need / PAGE) * PAGE;
+    await busy(refresh);
+  }
+  S.hits = hits;
+  applyHits(true);
+  const shown = S.matches.length;
+  toast(`${hits.length}${hits.length === 200 ? '+' : ''} matching commit${hits.length === 1 ? '' : 's'} in all history${shown < hits.length ? ` (${shown} loaded so far)` : ''}`);
+}
+
+function applyHits(jump = false) {
+  S.matches = S.hits.map((h) => S.index.get(h.sha)).filter((i) => i !== undefined).sort((a, b) => a - b);
+  S.matchSet = new Set(S.matches.map((i) => S.rows[i].sha));
+  $('#search').classList.remove('nomatch');
   if (jump) {
     S.matchPos = -1;
     nextMatch();
@@ -1046,7 +1150,10 @@ $('#search').addEventListener('input', (e) => {
   searchTimer = setTimeout(() => runSearch(e.target.value), 120);
 });
 $('#search').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') nextMatch(e.shiftKey ? -1 : 1);
+  if (e.key === 'Enter') {
+    if (!S.matches.length && e.target.value.trim()) searchAllHistory(e.target.value);
+    else nextMatch(e.shiftKey ? -1 : 1);
+  }
   if (e.key === 'Escape') {
     e.target.value = '';
     runSearch('', false);
@@ -1322,31 +1429,75 @@ function parseDiff(text) {
 /** Can lines/hunks of this diff be staged, unstaged or discarded on their own? */
 const partialOk = (file, m) => (file.mode === 'unstaged' || file.mode === 'staged') && !file.untracked && !m.binary && !m.whole && m.hunks.length;
 
+const VIRTUAL_MIN = 2000; // diff rows above which only the visible window is in the DOM
+const DL_H = 19; // fixed row height in virtual mode (matches styles.css)
+
+/** Flat list of rows (hunk headers and lines, with line numbers), built once per diff. */
+function diffItems(m) {
+  if (m.items) return m.items;
+  const items = [];
+  for (const [hi, h] of m.hunks.entries()) {
+    items.push({ hi, head: h.head });
+    let o = h.old, n = h.new;
+    for (const [li, ln] of h.lines.entries()) {
+      items.push({ hi, li, ln, key: ln.k === ' ' ? null : `${hi}:${li}`, o: ln.k === '+' ? '' : o++, n: ln.k === '-' ? '' : n++ });
+    }
+  }
+  m.items = items;
+  m.keys = items.filter((it) => it.key).map((it) => it.key);
+  return items;
+}
+
+function itemHtml(it, hunkBtns) {
+  if (it.head !== undefined) return `<div class="hunk" data-h="${it.hi}"><span>${esc(it.head)}</span>${hunkBtns}</div>`;
+  const { ln, key } = it;
+  const eol = ln.noeol ? '<span class="noeol" title="No newline at end of file">⏎̸</span>' : '';
+  const cls = ln.k === '+' ? ' add' : ln.k === '-' ? ' del' : '';
+  const sign = ln.k === '+' ? '+' : ln.k === '-' ? '−' : '';
+  const picked = key && S.lineSel.has(key) ? ' picked' : '';
+  return `<div class="dl${cls}${picked}"${key ? ` data-k="${key}"` : ''}><span class="n">${it.o}</span><span class="n">${it.n}</span><span class="s">${sign}</span><span class="t">${esc(ln.t)}${eol}</span></div>`;
+}
+
+function hunkButtons(m, file) {
+  if (!partialOk(file, m)) return '';
+  return file.mode === 'unstaged'
+    ? '<button class="mini" data-hunk="stage">Stage hunk</button><button class="mini danger" data-hunk="discard">Discard hunk</button>'
+    : '<button class="mini" data-hunk="unstage">Unstage hunk</button>';
+}
+
+/**
+ * Diffs up to VIRTUAL_MIN rows are rendered whole (text selection works across all of it).
+ * Bigger ones (lockfiles, generated code) get fixed-height rows and only the visible window,
+ * like the commit graph, so they open and scroll instantly.
+ */
 function diffHtml(m, file) {
   if (m.binary) return '<div class="diff-empty">Binary file — no text diff available.</div>';
   if (!m.hunks.length) return '<div class="diff-empty">No textual changes (mode change or empty file).</div>';
-  const partial = partialOk(file, m);
-  const hunkBtns =
-    !partial ? '' : file.mode === 'unstaged'
-      ? '<button class="mini" data-hunk="stage">Stage hunk</button><button class="mini danger" data-hunk="discard">Discard hunk</button>'
-      : '<button class="mini" data-hunk="unstage">Unstage hunk</button>';
-  let html = '', count = 0;
-  for (const [hi, h] of m.hunks.entries()) {
-    html += `<div class="hunk" data-h="${hi}"><span>${esc(h.head)}</span>${hunkBtns}</div>`;
-    let o = h.old, n = h.new;
-    for (const [li, ln] of h.lines.entries()) {
-      if (++count > 20000) return `<div class="diff-lines${partial ? ' picking' : ''}">${html}</div><div class="diff-empty">Diff truncated (over 20,000 lines).</div>`;
-      const key = `${hi}:${li}`;
-      const eol = ln.noeol ? '<span class="noeol" title="No newline at end of file">⏎̸</span>' : '';
-      if (ln.k === '+')
-        html += `<div class="dl add${S.lineSel.has(key) ? ' picked' : ''}" data-k="${key}"><span class="n"></span><span class="n">${n++}</span><span class="s">+</span><span class="t">${esc(ln.t)}${eol}</span></div>`;
-      else if (ln.k === '-')
-        html += `<div class="dl del${S.lineSel.has(key) ? ' picked' : ''}" data-k="${key}"><span class="n">${o++}</span><span class="n"></span><span class="s">−</span><span class="t">${esc(ln.t)}${eol}</span></div>`;
-      else html += `<div class="dl"><span class="n">${o++}</span><span class="n">${n++}</span><span class="s"></span><span class="t">${esc(ln.t)}${eol}</span></div>`;
-    }
+  const items = diffItems(m);
+  const picking = partialOk(file, m) ? ' picking' : '';
+  if (items.length <= VIRTUAL_MIN) {
+    const btns = hunkButtons(m, file);
+    return `<div class="diff-lines${picking}">${items.map((it) => itemHtml(it, btns)).join('')}</div>`;
   }
-  return `<div class="diff-lines${partial ? ' picking' : ''}">${html}</div>`;
+  // Rows are absolutely positioned, so the width comes from the longest line (tabs count as 8).
+  let widest = 0;
+  for (const it of items) if (it.ln) widest = Math.max(widest, it.ln.t.length + 7 * (it.ln.t.split('\t').length - 1));
+  return `<div class="diff-lines virtual${picking}" style="height:${items.length * DL_H}px;width:calc(150px + ${widest + 2}ch)"><div class="v-rows"></div></div>`;
 }
+
+function renderDiffWindow() {
+  const m = S.diffVirtual;
+  const host = m && $('#diff-body .v-rows');
+  if (!host) return;
+  const body = $('#diff-body');
+  const first = Math.max(0, Math.floor(body.scrollTop / DL_H) - 40);
+  const last = Math.min(m.items.length, Math.ceil((body.scrollTop + body.clientHeight) / DL_H) + 40);
+  const btns = hunkButtons(m, S.file);
+  let html = '';
+  for (let i = first; i < last; i++) html += `<div class="vrow" style="top:${i * DL_H}px">${itemHtml(m.items[i], btns)}</div>`;
+  host.innerHTML = html;
+}
+$('#diff-body').addEventListener('scroll', renderDiffWindow, { passive: true });
 
 /**
  * Patch containing only the picked changed lines. Applied forward (stage) the target is the
@@ -1419,6 +1570,7 @@ function openFileView(file) {
 }
 
 function showPane(file, path, stats, html, keepScroll) {
+  S.diffVirtual = null;
   $('#diff-path').textContent = path;
   $('#diff-stats').innerHTML = stats;
   $('#diff-actions').innerHTML = diffActionsHtml(file);
@@ -1442,6 +1594,10 @@ async function showDiff(file, silent = false) {
     S.lineAnchor = null;
     const m = S.diffModel;
     showPane(file, file.path, `<span class="add-c">+${m.adds}</span> <span class="del-c">−${m.dels}</span>`, diffHtml(m, file), silent);
+    if ($('#diff-body .diff-lines.virtual')) {
+      S.diffVirtual = m;
+      renderDiffWindow();
+    }
   } catch (e) {
     if (!silent) toast(String(e), 'err');
   }
@@ -1471,7 +1627,7 @@ $('#diff-body').addEventListener('click', (e) => {
   }
   const row = e.target.closest('.picking .dl[data-k]');
   if (!row || e.target.closest('.t')) return;
-  const keys = [...document.querySelectorAll('#diff-body .dl[data-k]')].map((el) => el.dataset.k);
+  const keys = S.diffModel?.keys || [];
   const k = row.dataset.k;
   if (e.shiftKey && S.lineAnchor && keys.includes(S.lineAnchor)) {
     const [a, b] = [keys.indexOf(S.lineAnchor), keys.indexOf(k)].sort((x, y) => x - y);

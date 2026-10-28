@@ -183,6 +183,56 @@ pub fn head(repo: &str) -> (Option<String>, Option<String>) {
     (sha.filter(|s| !s.is_empty()), branch.filter(|s| !s.is_empty()))
 }
 
+/// Whether git's commit-graph file exists (single file or split chain). It makes `--topo-order`
+/// over all branches, `log -- <path>` and blame much faster on big repositories.
+pub fn has_commit_graph(repo: &str) -> bool {
+    ["objects/info/commit-graph", "objects/info/commit-graphs/commit-graph-chain"].iter().any(|p| {
+        run(repo, &["rev-parse", "--git-path", p]).map(|g| Path::new(repo).join(g.trim()).is_file()).unwrap_or(false)
+    })
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SearchHit {
+    pub sha: String,
+    /// Index in the graph's commit order (`log --all --topo-order`), so the UI knows how much
+    /// history to load before it can show this commit.
+    pub pos: usize,
+}
+
+/// Commits whose message, author name/email or hash matches `query` (case-insensitive, literal).
+pub fn search(repo: &str, query: &str, max: usize) -> R<Vec<SearchHit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    let n = format!("-n{max}");
+    let base = ["log", "--exclude=refs/stash", "--all", "-i", "-F", "--format=%H", n.as_str()];
+    let mut shas: Vec<String> = vec![];
+    for filter in [format!("--grep={q}"), format!("--author={q}")] {
+        let mut args = base.to_vec();
+        args.push(&filter);
+        shas.extend(run(repo, &args)?.lines().map(String::from));
+    }
+    if q.len() >= 4 && q.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if let Ok(full) = run(repo, &["rev-parse", "-q", "--verify", &format!("{q}^{{commit}}")]) {
+            shas.push(full.trim().to_string());
+        }
+    }
+    if shas.is_empty() {
+        return Ok(vec![]);
+    }
+    let order = run(repo, &["log", "--exclude=refs/stash", "--all", "--topo-order", "--format=%H"])?;
+    let wanted: std::collections::HashSet<&str> = shas.iter().map(String::as_str).collect();
+    let mut hits: Vec<SearchHit> = order
+        .lines()
+        .enumerate()
+        .filter(|(_, sha)| wanted.contains(sha))
+        .map(|(pos, sha)| SearchHit { sha: sha.to_string(), pos })
+        .collect();
+    hits.truncate(max);
+    Ok(hits)
+}
+
 // ---------------------------------------------------------------- change detection
 
 /// Fingerprint of everything the commit graph depends on: every ref (stash included) and HEAD.
@@ -1095,5 +1145,25 @@ mod tests {
         assert_eq!(res.iter().find(|r| r.name == "ahead").unwrap().outcome, "current");
         std::fs::remove_dir_all(&base).unwrap();
         std::fs::remove_dir_all(&up).unwrap();
+    }
+
+    #[test]
+    fn searches_all_history_with_positions() {
+        let r = repo();
+        let a = commit(&r, "f", "1\n", "Fix login bug");
+        commit(&r, "f", "2\n", "Add feature\n\nalso touches LOGIN page");
+        let c = commit(&r, "f", "3\n", "Unrelated");
+        let hits = search(&r, "login", 50).unwrap();
+        // Newest first, positions in graph order; the body match counts too.
+        assert_eq!(hits.iter().map(|h| h.pos).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(hits[1].sha, a);
+        assert_eq!(search(&r, "example.com", 50).unwrap().len(), 3, "author email match");
+        assert_eq!(search(&r, &c[..8], 50).unwrap(), vec![SearchHit { sha: c.clone(), pos: 0 }]);
+        assert!(search(&r, "  ", 50).unwrap().is_empty());
+        assert!(search(&r, "[unclosed", 50).unwrap().is_empty(), "patterns are literal");
+        assert!(!has_commit_graph(&r));
+        run(&r, &["commit-graph", "write", "--reachable"]).unwrap();
+        assert!(has_commit_graph(&r));
+        std::fs::remove_dir_all(&r).unwrap();
     }
 }
