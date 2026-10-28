@@ -56,6 +56,23 @@
         <div id="graph-spacer"></div>
         <div id="graph-rows"></div>
       </div>
+      <div id="conflict-view" hidden>
+        <div class="diff-head">
+          <span class="i" data-icon="file"></span>
+          <b id="cf-path"></b>
+          <span id="cf-progress"></span>
+          <span class="spacer"></span>
+          <span id="cf-tools">
+            <button class="mini" id="cf-open" title="Open the file in its default app">Open in editor</button>
+            <button class="mini" id="cf-all-ours">All ours</button>
+            <button class="mini" id="cf-all-theirs">All theirs</button>
+            <button class="mini primary-mini" id="cf-save" disabled>Save &amp; mark resolved</button>
+          </span>
+          <button class="ghost" id="cf-close" title="Close (Esc)">✕</button>
+        </div>
+        <div id="cf-legend"></div>
+        <div id="cf-body"></div>
+      </div>
       <div id="diff-view" hidden>
         <div class="diff-head">
           <span class="i" data-icon="file"></span>
@@ -148,6 +165,7 @@
   </dialog>
 
   <script src="app.js"></script>
+  <script src="conflicts.js"></script>
   <script src="profiles.js"></script>
   <script src="updates.js"></script>
 </body>

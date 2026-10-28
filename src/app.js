@@ -134,8 +134,12 @@ async function git(args, okMsg) {
       await refresh();
       return out ?? '';
     } catch (e) {
-      toast(String(e), 'err');
+      const msg = String(e);
       await refresh();
+      if (/CONFLICT|could not apply|fix conflicts|after resolving the conflicts/i.test(msg) && S.index.has('WIP')) {
+        toast('Stopped on conflicts — resolve each file in the panel on the right, then Continue.', 'err');
+        select('WIP');
+      } else toast(msg, 'err');
       return null;
     }
   });
@@ -219,16 +223,19 @@ async function refresh() {
   refreshing = true;
   try {
     const repo = S.repo;
-    const [graph, status, refs] = await Promise.all([
+    const [graph, status, refs, op] = await Promise.all([
       invoke('get_graph', { repo }),
       invoke('get_status', { repo }),
       invoke('get_refs', { repo }),
+      invoke('get_repo_state', { repo }).catch(() => ({})),
     ]);
     if (repo !== S.repo) return;
     S.graph = graph;
     S.rows = graph.rows;
     S.status = status;
     S.refs = refs;
+    S.op = op || {};
+    if (S.conflictPath && !status.conflicted.some((f) => f.path === S.conflictPath)) closeConflict();
     S.index = new Map(S.rows.map((r, i) => [r.sha, i]));
     if (!S.selected || !S.index.has(S.selected)) S.selected = graph.dirty ? 'WIP' : graph.head_sha;
     if (S.file && S.file.mode !== 'commit') {
@@ -735,6 +742,7 @@ function select(sha, scroll = false) {
   if (!sha) return;
   S.selected = sha;
   closeDiff();
+  closeConflict();
   if (scroll) ensureVisible(S.index.get(sha));
   renderRows();
   renderDetail();
@@ -882,9 +890,10 @@ function fileRow(f, mode, actions = '') {
   const base = f.path.slice(slash + 1);
   const sel = S.file && S.file.path === f.path && S.file.mode === mode ? ' sel' : '';
   const title = f.orig ? `${f.orig} → ${f.path}` : f.path;
-  return `<div class="f-row${sel}" data-path="${esc(f.path)}" data-mode="${mode}" data-status="${esc(f.status)}" title="${esc(title)}">
+  return `<div class="f-row${sel}" data-path="${esc(f.path)}" data-mode="${mode}" data-status="${esc(f.status)}" data-xy="${esc(f.conflict || '')}" title="${esc(title)}">
     <span class="st st-${esc(f.status)}">${esc(f.status === '?' ? 'A' : f.status)}</span>
     <span class="p"><span><span class="dir">${esc(dir)}</span>${esc(base)}</span></span>
+    ${f.conflict ? `<small class="cx">${esc(CONFLICT_KIND[f.conflict] || f.conflict)}</small>` : ''}
     <span class="acts">${actions}</span></div>`;
 }
 
@@ -948,17 +957,26 @@ function renderWip() {
   const stageBtn = '<button class="mini" data-do="stage">Stage</button>';
   const discardBtn = '<button class="mini danger" data-do="discard">Discard</button>';
   const unstageBtn = '<button class="mini" data-do="unstage">Unstage</button>';
-  const resolvedBtn = '<button class="mini" data-do="stage">Mark resolved</button>';
-
-  let html = '';
+  let html = opBannerHtml();
   if (st.conflicted.length) {
-    html += `<div class="f-section-h">Conflicts (${st.conflicted.length})</div>` + st.conflicted.map((f) => fileRow(f, 'unstaged', resolvedBtn)).join('');
+    html += `<div class="f-section-h conflicts">Conflicts (${st.conflicted.length})<span class="spacer"></span><small>click a file to resolve</small></div>` +
+      st.conflicted.map((f) => fileRow(f, 'conflict')).join('');
   }
   html += `<div class="f-section-h">Unstaged Files (${st.unstaged.length})<span class="spacer"></span>${st.unstaged.length ? '<button class="mini" data-do="stage-all">Stage all</button>' : ''}</div>`;
   html += st.unstaged.length ? st.unstaged.map((f) => fileRow(f, 'unstaged', stageBtn + discardBtn)).join('') : '<div class="f-empty">No unstaged changes</div>';
   html += `<div class="f-section-h">Staged Files (${st.staged.length})<span class="spacer"></span>${st.staged.length ? '<button class="mini" data-do="unstage-all">Unstage all</button>' : ''}</div>`;
   html += st.staged.length ? st.staged.map((f) => fileRow(f, 'staged', unstageBtn)).join('') : '<div class="f-empty">No staged changes</div>';
   $('#wip-files').innerHTML = html;
+  // Rebase/cherry-pick/revert commit through Continue; a manual commit would add an extra one.
+  const op = S.op?.kind;
+  $('.commit-box').style.display = op && op !== 'merge' ? 'none' : '';
+  if (op === 'merge' && !draft.summary && !draft.mergePrefilled && S.op.message) {
+    const [first, ...rest] = S.op.message.split('\n').filter((l) => !l.startsWith('#'));
+    $('#c-summary').value = draft.summary = first || '';
+    $('#c-body').value = draft.body = rest.join('\n').trim();
+    draft.mergePrefilled = true;
+  }
+  if (!op) draft.mergePrefilled = false;
   updateCommitButton();
 }
 
@@ -970,8 +988,15 @@ function updateCommitButton() {
   const count = $('#c-count');
   count.textContent = len ? String(72 - len) : '';
   count.classList.toggle('over', len > 72);
-  btn.disabled = !draft.summary.trim() || (!n && !draft.amend) || S.status?.conflicted.length > 0;
-  btn.textContent = draft.amend ? 'Amend previous commit' : n ? `Commit changes to ${n} file${n === 1 ? '' : 's'}` : 'Stage files to commit';
+  const merging = S.op?.kind === 'merge';
+  btn.disabled = !draft.summary.trim() || (!n && !draft.amend && !merging) || S.status?.conflicted.length > 0;
+  btn.textContent = merging
+    ? 'Commit merge'
+    : draft.amend
+      ? 'Amend previous commit'
+      : n
+        ? `Commit changes to ${n} file${n === 1 ? '' : 's'}`
+        : 'Stage files to commit';
 }
 
 async function doCommit() {
@@ -1025,6 +1050,7 @@ $('#detail').addEventListener('click', (e) => {
   }
   const link = e.target.closest('[data-sha-link]');
   if (link) return jumpTo(link.dataset.shaLink);
+  if (row && row.dataset.mode === 'conflict') return openConflict(row.dataset.path, row.dataset.xy);
   if (row) {
     const mode = row.dataset.mode;
     showDiff({ path: row.dataset.path, mode, sha: mode === 'commit' ? S.selected : null, untracked: row.dataset.status === '?' });
@@ -1098,18 +1124,18 @@ function parseDiff(text) {
     const t = line.slice(1);
     if (line[0] === '+') {
       adds++;
-      html += `<div class="dl add"><span class="n"></span><span class="n">${newN++}</span><span class="t">${esc(t)}</span></div>`;
+      html += `<div class="dl add"><span class="n"></span><span class="n">${newN++}</span><span class="s">+</span><span class="t">${esc(t)}</span></div>`;
     } else if (line[0] === '-') {
       dels++;
-      html += `<div class="dl del"><span class="n">${oldN++}</span><span class="n"></span><span class="t">${esc(t)}</span></div>`;
+      html += `<div class="dl del"><span class="n">${oldN++}</span><span class="n"></span><span class="s">−</span><span class="t">${esc(t)}</span></div>`;
     } else if (line[0] === ' ') {
-      html += `<div class="dl"><span class="n">${oldN++}</span><span class="n">${newN++}</span><span class="t">${esc(t)}</span></div>`;
+      html += `<div class="dl"><span class="n">${oldN++}</span><span class="n">${newN++}</span><span class="s"></span><span class="t">${esc(t)}</span></div>`;
     } else if (line[0] === '\\') {
-      html += `<div class="dl"><span class="n"></span><span class="n"></span><span class="t" style="color:var(--text-faint)">${esc(line)}</span></div>`;
+      html += `<div class="dl"><span class="n"></span><span class="n"></span><span class="s"></span><span class="t" style="color:var(--text-faint)">${esc(line)}</span></div>`;
     }
   }
-  if (!html) html = '<div class="diff-empty">No textual changes (mode change or empty file).</div>';
-  return { html, adds, dels };
+  if (!html) return { html: '<div class="diff-empty">No textual changes (mode change or empty file).</div>', adds, dels };
+  return { html: `<div class="diff-lines">${html}</div>`, adds, dels };
 }
 
 async function showDiff(file, silent = false) {

@@ -153,7 +153,10 @@ fn get_graph(repo: String, limit: Option<usize>) -> R<GraphPayload> {
     let mut commits = git::log(&repo, limit.unwrap_or(5000))?;
     let (head_sha, head_branch) = git::head(&repo);
     let st = git::status(&repo)?;
-    let dirty = !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicted.is_empty());
+    // A merge/rebase in progress keeps the WIP row so it can be continued or aborted,
+    // even when resolving left the working tree identical to HEAD.
+    let dirty = !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicted.is_empty())
+        || git::repo_state(&repo).kind.is_some();
     if dirty {
         // Synthetic work-in-progress node on top of HEAD, like GitKraken's "// WIP" row.
         commits.insert(
@@ -212,11 +215,39 @@ fn git_run(profile_id: String, repo: String, args: Vec<String>) -> R<String> {
 }
 
 #[tauri::command(async)]
-fn reveal(repo: String, target: String) -> R<()> {
+fn get_repo_state(repo: String) -> git::RepoState {
+    git::repo_state(&repo)
+}
+
+#[tauri::command(async)]
+fn read_conflict(repo: String, path: String) -> R<git::ConflictFile> {
+    git::read_conflict(&repo, &path)
+}
+
+/// Write the resolved content of a conflicted file and stage it.
+#[tauri::command(async)]
+fn resolve_conflict(profile_id: String, repo: String, path: String, content: String) -> R<()> {
+    let store = profiles::load();
+    let profile = store.for_repo(&profile_id, &repo)?;
+    git::write_conflict(&repo, &path, &content)?;
+    git::exec(&repo, &["add", "--", &path], &[0], &profiles::ctx(profile)).map(|_| ())
+}
+
+#[tauri::command(async)]
+fn reveal(repo: String, target: String, path: Option<String>) -> R<()> {
     let mut cmd = std::process::Command::new("open");
     match target.as_str() {
         "terminal" => cmd.args(["-a", "Terminal", &repo]),
         "finder" => cmd.arg(&repo),
+        // Open a file in the repo with its default app (e.g. your code editor).
+        "file" => {
+            let rel = path.ok_or("missing path")?;
+            let full = PathBuf::from(&repo).join(&rel);
+            if rel.contains("..") || !full.is_file() {
+                return Err(format!("{rel} not found"));
+            }
+            cmd.arg(full)
+        }
         _ => return Err("unknown target".into()),
     };
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
@@ -255,6 +286,9 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
             json!(set_terminal_config(s("profile_id"), repo, get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))?)
         }
         "clone_repo" => to_value(clone_repo(s("profile_id"), s("url"), s("parent"))?).unwrap(),
+        "get_repo_state" => to_value(get_repo_state(repo)).unwrap(),
+        "read_conflict" => to_value(read_conflict(repo, s("path"))?).unwrap(),
+        "resolve_conflict" => json!(resolve_conflict(s("profile_id"), repo, s("path"), s("content"))?),
         "get_graph" => to_value(get_graph(repo, None)?).unwrap(),
         "get_status" => to_value(get_status(repo)?).unwrap(),
         "get_refs" => to_value(get_refs(repo)?).unwrap(),
@@ -328,6 +362,9 @@ fn main() {
             get_commit,
             get_diff,
             git_run,
+            get_repo_state,
+            read_conflict,
+            resolve_conflict,
             reveal,
             updater::check_update,
             updater::install_update

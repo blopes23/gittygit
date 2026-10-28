@@ -56,6 +56,9 @@ pub fn exec(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx) -> R<String> 
         .env("LC_ALL", "en_US.UTF-8")
         .env("LANGUAGE", "en")
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Continuing a merge/rebase/cherry-pick would open an editor for the prepared
+        // message; accept it as-is (there is no terminal to edit in).
+        .env("GIT_EDITOR", "true")
         .env("GIT_OPTIONAL_LOCKS", "0");
     match &ctx.ssh_command {
         Some(ssh) => {
@@ -161,6 +164,9 @@ pub struct FileChange {
     pub path: String,
     pub status: String,
     pub orig: Option<String>,
+    /// For conflicted files: git's two-letter state (UU, AA, DU, UD, AU, UA, DD).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -184,18 +190,18 @@ pub fn status(repo: &str) -> R<Status> {
         let orig = if x == "R" || x == "C" { it.next().map(String::from) } else { None };
         let xy = &entry[0..2];
         if matches!(xy, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU") {
-            st.conflicted.push(FileChange { path, status: "U".into(), orig });
+            st.conflicted.push(FileChange { path, status: "U".into(), orig, conflict: Some(xy.to_string()) });
             continue;
         }
         if xy == "??" {
-            st.unstaged.push(FileChange { path, status: "?".into(), orig: None });
+            st.unstaged.push(FileChange { path, status: "?".into(), orig: None, conflict: None });
             continue;
         }
         if x != " " {
-            st.staged.push(FileChange { path: path.clone(), status: x.into(), orig: orig.clone() });
+            st.staged.push(FileChange { path: path.clone(), status: x.into(), orig: orig.clone(), conflict: None });
         }
         if y != " " {
-            st.unstaged.push(FileChange { path, status: y.into(), orig: None });
+            st.unstaged.push(FileChange { path, status: y.into(), orig: None, conflict: None });
         }
     }
     Ok(st)
@@ -345,10 +351,10 @@ pub fn commit(repo: &str, sha: &str) -> R<CommitDetail> {
         if code == "R" || code == "C" {
             let orig = it.next().map(String::from);
             if let Some(p) = it.next() {
-                files.push(FileChange { path: p.into(), status: code.into(), orig });
+                files.push(FileChange { path: p.into(), status: code.into(), orig, conflict: None });
             }
         } else if let Some(p) = it.next() {
-            files.push(FileChange { path: p.into(), status: code.into(), orig: None });
+            files.push(FileChange { path: p.into(), status: code.into(), orig: None, conflict: None });
         }
     }
     Ok(CommitDetail {
@@ -381,4 +387,113 @@ pub fn diff(repo: &str, path: &str, mode: &str, sha: Option<&str>, untracked: bo
         }
         _ => Err(format!("unknown diff mode {mode}")),
     }
+}
+
+// ---------------------------------------------------------------- merge / rebase state & conflicts
+
+#[derive(Serialize, Default)]
+pub struct RepoState {
+    /// "merge" | "rebase" | "cherry-pick" | "revert" while one is in progress.
+    pub kind: Option<String>,
+    /// What is being applied: merged branch, commit being replayed/picked.
+    pub incoming: Option<String>,
+    /// Rebase: what the branch is being rebased onto.
+    pub onto: Option<String>,
+    /// Rebase: branch being rebased.
+    pub head_name: Option<String>,
+    /// Rebase progress (current, total).
+    pub step: Option<(u32, u32)>,
+    /// Prepared commit message (merge).
+    pub message: Option<String>,
+}
+
+fn ref_label(repo: &str, sha: &str) -> String {
+    let names = run(repo, &["for-each-ref", "--points-at", sha, "--format=%(refname:short)", "refs/heads", "refs/remotes"])
+        .unwrap_or_default();
+    match names.lines().next() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => run(repo, &["log", "-1", "--format=%h %s", sha]).map(|s| s.trim().to_string()).unwrap_or_else(|_| sha.chars().take(7).collect()),
+    }
+}
+
+pub fn repo_state(repo: &str) -> RepoState {
+    let Ok(git_dir) = run(repo, &["rev-parse", "--absolute-git-dir"]) else { return RepoState::default() };
+    let g = Path::new(git_dir.trim()).to_path_buf();
+    let read = |p: &str| std::fs::read_to_string(g.join(p)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let commit_line = |sha: &str| run(repo, &["log", "-1", "--format=%h %s", sha]).ok().map(|s| s.trim().to_string());
+
+    let rebase_dir = ["rebase-merge", "rebase-apply"].into_iter().find(|d| g.join(d).is_dir());
+    if let Some(d) = rebase_dir {
+        let num = |f: &str| read(&format!("{d}/{f}")).and_then(|v| v.parse::<u32>().ok());
+        let step = if d == "rebase-merge" { num("msgnum").zip(num("end")) } else { num("next").zip(num("last")) };
+        return RepoState {
+            kind: Some("rebase".into()),
+            incoming: read("REBASE_HEAD").and_then(|sha| commit_line(&sha)),
+            onto: read(&format!("{d}/onto")).map(|sha| ref_label(repo, &sha)),
+            head_name: read(&format!("{d}/head-name")).map(|h| h.trim_start_matches("refs/heads/").to_string()),
+            step,
+            message: None,
+        };
+    }
+    if let Some(sha) = read("MERGE_HEAD") {
+        let message = read("MERGE_MSG");
+        // "Merge branch 'x' into y" / "Merge remote-tracking branch 'origin/x'" → x
+        let named = message.as_deref().and_then(|m| m.lines().next()).and_then(|l| l.split('\'').nth(1)).map(String::from);
+        return RepoState {
+            kind: Some("merge".into()),
+            incoming: named.or_else(|| Some(ref_label(repo, sha.lines().next().unwrap_or_default()))),
+            message,
+            ..Default::default()
+        };
+    }
+    for (file, kind) in [("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")] {
+        if let Some(sha) = read(file) {
+            return RepoState { kind: Some(kind.into()), incoming: commit_line(&sha), ..Default::default() };
+        }
+    }
+    RepoState::default()
+}
+
+fn conflicted_paths(repo: &str) -> Vec<String> {
+    run(repo, &["diff", "--name-only", "--diff-filter=U", "-z"])
+        .unwrap_or_default()
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Only files git currently reports as conflicted may be read or written this way.
+fn conflict_path(repo: &str, path: &str) -> R<std::path::PathBuf> {
+    if !conflicted_paths(repo).iter().any(|p| p == path) {
+        return Err(format!("{path} is not in conflict"));
+    }
+    Ok(Path::new(repo).join(path))
+}
+
+#[derive(Serialize)]
+pub struct ConflictFile {
+    pub exists: bool,
+    pub binary: bool,
+    pub text: Option<String>,
+}
+
+pub fn read_conflict(repo: &str, path: &str) -> R<ConflictFile> {
+    let full = conflict_path(repo, path)?;
+    if !full.is_file() {
+        return Ok(ConflictFile { exists: false, binary: false, text: None });
+    }
+    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+    if bytes.len() > 5 * 1024 * 1024 || bytes.contains(&0) {
+        return Ok(ConflictFile { exists: true, binary: true, text: None });
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(ConflictFile { exists: true, binary: false, text: Some(text) }),
+        Err(_) => Ok(ConflictFile { exists: true, binary: true, text: None }),
+    }
+}
+
+pub fn write_conflict(repo: &str, path: &str, content: &str) -> R<()> {
+    let full = conflict_path(repo, path)?;
+    std::fs::write(full, content).map_err(|e| e.to_string())
 }

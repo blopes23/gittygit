@@ -16,6 +16,9 @@ See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering n
 - Pull into a branch without checking it out (right-click → "Pull … (fast-forward)", works on multi-selection too)
 - Multi-select local branches (⌘-click, ⇧-click, ⌘A) and delete them in one go (⌫ or right-click); unmerged ones get a single force-delete prompt
 - Working tree: stage / unstage / discard per file or all, commit, amend
+- Conflict resolution for merges, rebases, cherry-picks, reverts and stash pops: side-by-side ours/theirs per
+  conflict with ours / theirs / both / hand-edited results, keep-or-delete for deleted files, whole-version pick for
+  binaries, and a banner to continue, skip (rebase) or abort the operation
 - Commit details with changed files; unified diff viewer
 - Toolbar: pull, push (sets upstream on first push), fetch, branch, stash, pop, open in Terminal/Finder
 - Context menus: checkout, merge, rebase, cherry-pick, revert, reset soft/mixed/hard, tag, delete branch
