@@ -150,13 +150,20 @@ fn init_repo(path: String) -> R<()> {
 
 #[tauri::command(async)]
 fn get_graph(repo: String, limit: Option<usize>) -> R<GraphPayload> {
-    let mut commits = git::log(&repo, limit.unwrap_or(5000))?;
-    let (head_sha, head_branch) = git::head(&repo);
     let st = git::status(&repo)?;
-    // A merge/rebase in progress keeps the WIP row so it can be continued or aborted,
-    // even when resolving left the working tree identical to HEAD.
-    let dirty = !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicted.is_empty())
-        || git::repo_state(&repo).kind.is_some();
+    let dirty = is_dirty(&st, &git::repo_state(&repo));
+    build_graph(&repo, limit.unwrap_or(5000), dirty)
+}
+
+/// A merge/rebase in progress keeps the WIP row so it can be continued or aborted,
+/// even when resolving left the working tree identical to HEAD.
+fn is_dirty(st: &git::Status, op: &git::RepoState) -> bool {
+    !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicted.is_empty()) || op.kind.is_some()
+}
+
+fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
+    let mut commits = git::log(repo, limit)?;
+    let (head_sha, head_branch) = git::head(repo);
     if dirty {
         // Synthetic work-in-progress node on top of HEAD, like GitKraken's "// WIP" row.
         commits.insert(
@@ -174,6 +181,37 @@ fn get_graph(repo: String, limit: Option<usize>) -> R<GraphPayload> {
     }
     let (rows, max_lanes) = graph::layout(commits);
     Ok(GraphPayload { rows, max_lanes, head_sha, head_branch, dirty })
+}
+
+#[derive(Serialize)]
+struct Snapshot {
+    /// Identifies the graph below; pass it back as `known_key` to skip rebuilding an unchanged graph.
+    key: String,
+    /// None when `known_key` still matches (the caller keeps its graph).
+    graph: Option<GraphPayload>,
+    status: git::Status,
+    refs: git::Refs,
+    op: git::RepoState,
+}
+
+/// Everything a refresh needs in one call. The commit graph (the expensive part: `git log` of
+/// thousands of commits plus layout) is only rebuilt when refs, HEAD or the WIP row changed.
+#[tauri::command(async)]
+fn get_snapshot(repo: String, known_key: Option<String>) -> R<Snapshot> {
+    let status = git::status(&repo)?;
+    let op = git::repo_state(&repo);
+    let dirty = is_dirty(&status, &op);
+    let key = git::graph_key(&repo, dirty)?;
+    let graph = if known_key.as_deref() == Some(key.as_str()) { None } else { Some(build_graph(&repo, 5000, dirty)?) };
+    Ok(Snapshot { key, graph, status, refs: git::refs(&repo)?, op })
+}
+
+/// Fast-forward several local branches from their upstreams, one fetch per remote.
+#[tauri::command(async)]
+fn fast_forward(profile_id: String, repo: String, branches: Vec<git::FfBranch>) -> R<Vec<git::FfResult>> {
+    let store = profiles::load();
+    let profile = store.for_repo(&profile_id, &repo)?;
+    git::fast_forward(&repo, &branches, &profiles::ctx(profile))
 }
 
 #[tauri::command(async)]
@@ -333,6 +371,14 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "read_conflict" => to_value(read_conflict(repo, s("path"))?).unwrap(),
         "resolve_conflict" => json!(resolve_conflict(s("profile_id"), repo, s("path"), s("content"))?),
         "get_graph" => to_value(get_graph(repo, None)?).unwrap(),
+        "get_snapshot" => {
+            let known = Some(s("known_key")).filter(|k| !k.is_empty());
+            to_value(get_snapshot(repo, known)?).unwrap()
+        }
+        "fast_forward" => {
+            let branches = serde_json::from_value(get("branches").unwrap_or_default()).map_err(|e| e.to_string())?;
+            to_value(fast_forward(s("profile_id"), repo, branches)?).unwrap()
+        }
         "get_status" => to_value(get_status(repo)?).unwrap(),
         "get_refs" => to_value(get_refs(repo)?).unwrap(),
         "get_commit" => to_value(get_commit(repo, s("sha"))?).unwrap(),
@@ -416,6 +462,8 @@ fn main() {
             add_key_to_keychain,
             clone_repo,
             get_graph,
+            get_snapshot,
+            fast_forward,
             get_status,
             get_refs,
             get_commit,

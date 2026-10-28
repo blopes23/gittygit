@@ -49,6 +49,23 @@ pub fn exec(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx) -> R<String> 
 
 /// `exec` with extra environment variables and optional stdin.
 pub fn exec_with(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx, env: &[(&str, &str)], stdin: Option<&[u8]>) -> R<String> {
+    let out = spawn(cwd, args, ctx, env, stdin)?;
+    if ok_codes.contains(&out.code) {
+        return Ok(out.stdout);
+    }
+    let msg = if out.stderr.trim().is_empty() { out.stdout.trim() } else { out.stderr.trim() };
+    Err(if msg.is_empty() { format!("git exited with {}", out.code) } else { msg.to_string() })
+}
+
+/// Exit code and both output streams of one git run.
+pub struct Output {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run git and return its raw result, whatever the exit code.
+pub fn spawn(cwd: &str, args: &[&str], ctx: &Ctx, env: &[(&str, &str)], stdin: Option<&[u8]>) -> R<Output> {
     let mut cmd = Command::new(git_bin());
     cmd.arg("-C").arg(cwd);
     if let Some((name, email)) = &ctx.identity {
@@ -86,18 +103,11 @@ pub fn exec_with(cwd: &str, args: &[&str], ok_codes: &[i32], ctx: &Ctx, env: &[(
         }
     }
     .map_err(|e| format!("failed to run git: {e}"))?;
-    let code = out.status.code().unwrap_or(-1);
-    if ok_codes.contains(&code) {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let msg = if err.is_empty() {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        } else {
-            err
-        };
-        Err(if msg.is_empty() { format!("git exited with {code}") } else { msg })
-    }
+    Ok(Output {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
 pub fn run_codes(repo: &str, args: &[&str], ok_codes: &[i32]) -> R<String> {
@@ -171,6 +181,20 @@ pub fn head(repo: &str) -> (Option<String>, Option<String>) {
     let sha = run(repo, &["rev-parse", "--verify", "-q", "HEAD"]).ok().map(|s| s.trim().to_string());
     let branch = run(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).ok().map(|s| s.trim().to_string());
     (sha.filter(|s| !s.is_empty()), branch.filter(|s| !s.is_empty()))
+}
+
+// ---------------------------------------------------------------- change detection
+
+/// Fingerprint of everything the commit graph depends on: every ref (stash included) and HEAD.
+/// The working tree's own changes don't affect it, so most file saves leave it unchanged.
+pub fn graph_key(repo: &str, dirty: bool) -> R<String> {
+    use std::hash::{Hash, Hasher};
+    let refs = run(repo, &["for-each-ref", "--format=%(objectname) %(refname)"])?;
+    let head = run(repo, &["rev-parse", "-q", "--verify", "--symbolic-full-name", "HEAD"]).unwrap_or_default();
+    let sha = run(repo, &["rev-parse", "-q", "--verify", "HEAD"]).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (refs, head, sha, dirty).hash(&mut h);
+    Ok(format!("{:016x}", h.finish()))
 }
 
 // ---------------------------------------------------------------- status
@@ -514,6 +538,102 @@ pub fn write_conflict(repo: &str, path: &str, content: &str) -> R<()> {
     std::fs::write(full, content).map_err(|e| e.to_string())
 }
 
+
+// ---------------------------------------------------------------- fast-forward without checkout
+
+#[derive(serde::Deserialize, Clone)]
+pub struct FfBranch {
+    pub name: String,
+    pub remote: String,
+    /// Upstream ref on the remote, e.g. "refs/heads/main".
+    pub remote_ref: String,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct FfResult {
+    pub name: String,
+    /// "updated" | "current" | "diverged" | "checked-out" | "failed"
+    pub outcome: String,
+    pub detail: String,
+}
+
+fn ff_result(name: &str, outcome: &str, detail: &str) -> FfResult {
+    FfResult { name: name.into(), outcome: outcome.into(), detail: detail.into() }
+}
+
+/// Outcome per local branch from `git fetch -v` ref lines:
+/// " <flag> <summary> <from> -> <to> [(reason)]" where flag ' ' = fast-forward, '=' = up to date,
+/// '!' = rejected. (Plain text rather than --porcelain, which needs git 2.41.)
+pub fn parse_fetch_lines(stderr: &str, branches: &[FfBranch]) -> Vec<FfResult> {
+    let mut out = vec![];
+    for line in stderr.lines() {
+        let Some(rest) = line.strip_prefix(' ') else { continue };
+        let mut chars = rest.chars();
+        let flag = chars.next().unwrap_or(' ');
+        let Some((_, right)) = chars.as_str().split_once(" -> ") else { continue };
+        let (to, reason) = match right.split_once("  (") {
+            Some((t, r)) => (t.trim(), r.trim_end_matches(')').to_string()),
+            None => (right.trim(), String::new()),
+        };
+        let Some(b) = branches.iter().find(|b| b.name == to || format!("refs/heads/{}", b.name) == to) else { continue };
+        out.push(match flag {
+            '=' => ff_result(&b.name, "current", ""),
+            ' ' | '+' | '*' => ff_result(&b.name, "updated", ""),
+            '!' if reason.contains("non-fast-forward") => ff_result(&b.name, "diverged", &reason),
+            _ => ff_result(&b.name, "failed", if reason.is_empty() { line.trim() } else { &reason }),
+        });
+    }
+    out
+}
+
+/// Update local branches from their upstreams without checking them out: one `git fetch` per
+/// remote with a `<remote-ref>:refs/heads/<branch>` refspec per branch (fast-forwards only).
+pub fn fast_forward(repo: &str, branches: &[FfBranch], ctx: &Ctx) -> R<Vec<FfResult>> {
+    let mut results = vec![];
+    let mut remotes: Vec<&str> = branches.iter().map(|b| b.remote.as_str()).collect();
+    remotes.sort_unstable();
+    remotes.dedup();
+    for remote in remotes {
+        let mut todo: Vec<FfBranch> = branches.iter().filter(|b| b.remote == remote).cloned().collect();
+        // A fatal error about one branch (checked out elsewhere, upstream gone) aborts the whole
+        // fetch; set that branch aside and retry the rest.
+        while !todo.is_empty() {
+            let specs: Vec<String> = todo.iter().map(|b| format!("{}:refs/heads/{}", b.remote_ref, b.name)).collect();
+            let mut args = vec!["fetch", "-v", "--no-tags", remote];
+            args.extend(specs.iter().map(String::as_str));
+            let out = spawn(repo, &args, ctx, &[], None)?;
+            let fatal = out.stderr.lines().find(|l| l.starts_with("fatal:")).map(str::to_string);
+            if let Some(f) = fatal {
+                let culprit = todo.iter().position(|b| {
+                    f.contains(&format!("'refs/heads/{}'", b.name)) || f.contains(&format!("remote ref {}", b.remote_ref))
+                });
+                match culprit {
+                    Some(i) => {
+                        let b = todo.remove(i);
+                        let outcome = if f.contains("checked out") { "checked-out" } else { "failed" };
+                        let detail = if f.contains("couldn't find remote ref") { format!("{} no longer exists on {remote}", b.remote_ref) } else { f.trim_start_matches("fatal: ").to_string() };
+                        results.push(ff_result(&b.name, outcome, &detail));
+                        continue;
+                    }
+                    None => {
+                        let detail = out.stderr.trim().to_string();
+                        results.extend(todo.iter().map(|b| ff_result(&b.name, "failed", &detail)));
+                        break;
+                    }
+                }
+            }
+            let parsed = parse_fetch_lines(&out.stderr, &todo);
+            for b in &todo {
+                match parsed.iter().find(|r| r.name == b.name) {
+                    Some(r) => results.push(ff_result(&r.name, &r.outcome, &r.detail)),
+                    None => results.push(ff_result(&b.name, "failed", out.stderr.trim())),
+                }
+            }
+            break;
+        }
+    }
+    Ok(results)
+}
 
 // ---------------------------------------------------------------- partial staging
 
@@ -900,5 +1020,80 @@ mod tests {
         apply_patch(&r, &patch, "unstage", &Ctx::default()).unwrap();
         assert!(run(&r, &["diff", "--cached"]).unwrap().is_empty());
         std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn graph_key_tracks_refs_not_edits() {
+        let r = repo();
+        commit(&r, "f", "1\n", "A");
+        let k1 = graph_key(&r, false).unwrap();
+        std::fs::write(Path::new(&r).join("f"), "edited\n").unwrap();
+        assert_eq!(graph_key(&r, false).unwrap(), k1, "a file edit changed the key");
+        assert_ne!(graph_key(&r, true).unwrap(), k1, "the WIP row must change the key");
+        run(&r, &["branch", "topic"]).unwrap();
+        let k2 = graph_key(&r, false).unwrap();
+        assert_ne!(k2, k1);
+        run(&r, &["switch", "-q", "topic"]).unwrap();
+        assert_ne!(graph_key(&r, false).unwrap(), k2, "switching branch must change the key");
+        run(&r, &["stash", "-q"]).unwrap();
+        assert_ne!(graph_key(&r, false).unwrap(), k2, "a stash must change the key");
+        std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn parses_fetch_output() {
+        let b = |n: &str| FfBranch { name: n.into(), remote: "origin".into(), remote_ref: format!("refs/heads/{n}") };
+        let branches = [b("main"), b("dev"), b("old"), b("x")];
+        let err = "From github.com:o/r\n = [up to date]      main       -> main\n   1a2b3c4..5d6e7f8  dev        -> dev\n ! [rejected]        old        -> old  (non-fast-forward)\n";
+        let got = parse_fetch_lines(err, &branches);
+        assert_eq!(got, vec![
+            ff_result("main", "current", ""),
+            ff_result("dev", "updated", ""),
+            ff_result("old", "diverged", "non-fast-forward"),
+        ]);
+    }
+
+    #[test]
+    fn fast_forwards_several_branches_in_one_fetch() {
+        let base = std::env::temp_dir().join(format!("gittygit-ff-{}-{}", std::process::id(), rand_suffix()));
+        std::fs::create_dir_all(&base).unwrap();
+        let b = base.to_string_lossy().into_owned();
+        run(&b, &["init", "-q", "--bare", "-b", "main", "remote.git"]).unwrap();
+        let up = repo();
+        run(&up, &["remote", "add", "origin", &format!("{b}/remote.git")]).unwrap();
+        commit(&up, "f", "1\n", "A");
+        for br in ["ahead", "same", "diverge"] {
+            run(&up, &["branch", br]).unwrap();
+        }
+        run(&up, &["push", "-q", "origin", "--all"]).unwrap();
+        run(&b, &["clone", "-q", &format!("{b}/remote.git"), "local"]).unwrap();
+        let local = format!("{b}/local");
+        run(&local, &["config", "user.name", "T"]).unwrap();
+        run(&local, &["config", "user.email", "t@example.com"]).unwrap();
+        for br in ["ahead", "same", "diverge"] {
+            run(&local, &["branch", br, &format!("origin/{br}")]).unwrap();
+        }
+        // Upstream moves "ahead" and "diverge"; locally "diverge" gets its own commit.
+        for br in ["ahead", "diverge"] {
+            run(&up, &["switch", "-q", br]).unwrap();
+            commit(&up, "f", &format!("{br}\n"), br);
+        }
+        run(&up, &["push", "-q", "origin", "--all"]).unwrap();
+        run(&local, &["switch", "-q", "diverge"]).unwrap();
+        commit(&local, "g", "local\n", "local work");
+        run(&local, &["switch", "-q", "main"]).unwrap();
+
+        let ff = |n: &str| FfBranch { name: n.into(), remote: "origin".into(), remote_ref: format!("refs/heads/{n}") };
+        let mut res = fast_forward(&local, &[ff("ahead"), ff("same"), ff("diverge"), ff("gone")], &Ctx::default()).unwrap();
+        res.sort_by(|a, b| a.name.cmp(&b.name));
+        let outcomes: Vec<(&str, &str)> = res.iter().map(|r| (r.name.as_str(), r.outcome.as_str())).collect();
+        assert_eq!(outcomes, [("ahead", "updated"), ("diverge", "diverged"), ("gone", "failed"), ("same", "current")]);
+        assert_eq!(run(&local, &["rev-parse", "ahead"]).unwrap(), run(&up, &["rev-parse", "ahead"]).unwrap());
+        // The current branch is refused by git; reported, the rest unaffected.
+        let res = fast_forward(&local, &[ff("main"), ff("ahead")], &Ctx::default()).unwrap();
+        assert_eq!(res.iter().find(|r| r.name == "main").unwrap().outcome, "checked-out");
+        assert_eq!(res.iter().find(|r| r.name == "ahead").unwrap().outcome, "current");
+        std::fs::remove_dir_all(&base).unwrap();
+        std::fs::remove_dir_all(&up).unwrap();
     }
 }

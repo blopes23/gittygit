@@ -301,20 +301,23 @@ async function refresh() {
   refreshing = true;
   try {
     const repo = S.repo;
-    const [graph, status, refs, op] = await Promise.all([
-      invoke('get_graph', { repo }),
-      invoke('get_status', { repo }),
-      invoke('get_refs', { repo }),
-      invoke('get_repo_state', { repo }).catch(() => ({})),
-    ]);
+    // The graph comes back only when refs, HEAD or the WIP row changed since `graphKey`.
+    const knownKey = S.graph && S.graphFor === repo ? S.graphKey : null;
+    const snap = await invoke('get_snapshot', { repo, knownKey });
     if (repo !== S.repo) return;
-    S.graph = graph;
-    S.rows = graph.rows;
+    const { status, refs, op } = snap;
+    if (snap.graph) {
+      S.graph = snap.graph;
+      S.rows = snap.graph.rows;
+      S.graphKey = snap.key;
+      S.graphFor = repo;
+    }
+    const graph = S.graph;
     S.status = status;
     S.refs = refs;
     S.op = op || {};
     if (S.conflictPath && !status.conflicted.some((f) => f.path === S.conflictPath)) closeConflict();
-    S.index = new Map(S.rows.map((r, i) => [r.sha, i]));
+    if (snap.graph) S.index = new Map(S.rows.map((r, i) => [r.sha, i]));
     if (!S.selected || !S.index.has(S.selected)) S.selected = graph.dirty ? 'WIP' : graph.head_sha;
     if (S.file && (S.file.mode === 'staged' || S.file.mode === 'unstaged')) {
       // Follow the file when all of it moved between unstaged and staged (e.g. last hunk staged).
@@ -326,7 +329,7 @@ async function refresh() {
     }
     renderToolbar();
     renderSidebar();
-    layoutGraph();
+    if (snap.graph) layoutGraph();
     renderRows();
     renderDetail();
     if (S.matches.length) runSearch($('#search').value, false);
@@ -725,34 +728,30 @@ async function deleteBranches(names) {
 }
 
 /**
- * Update local branches from their upstream without checking them out:
- * `git fetch <remote> <remote-ref>:refs/heads/<branch>` only succeeds as a fast-forward.
+ * Update local branches from their upstream without checking them out. The backend runs one
+ * `git fetch <remote> <ref>:refs/heads/<branch> …` per remote, which only fast-forwards.
  */
 async function fastForward(branches) {
   const before = new Map(S.refs.branches.map((b) => [b.name, b.sha]));
-  const updated = [], current = [], diverged = [], failed = [];
-  await busy(async () => {
-    for (const b of branches) {
-      try {
-        await gitRaw(['fetch', b.upstream_remote, `${b.upstream_ref}:refs/heads/${b.name}`]);
-        updated.push(b.name);
-      } catch (e) {
-        const msg = String(e);
-        if (/non-fast-forward|rejected/.test(msg)) diverged.push(b.name);
-        else if (/checked out/.test(msg)) failed.push(`${b.name} is checked out in another worktree`);
-        else failed.push(`${b.name}: ${msg}`);
-      }
-    }
-    await refresh();
-  });
+  const list = branches.map((b) => ({ name: b.name, remote: b.upstream_remote, remote_ref: b.upstream_ref }));
+  let res;
+  try {
+    res = await busy(() => invoke('fast_forward', { profileId: activeProfile().id, repo: S.repo, branches: list }));
+  } catch (e) {
+    return toast(explainGitError(String(e)), 'err');
+  }
+  await busy(refresh);
   const after = new Map(S.refs.branches.map((b) => [b.name, b.sha]));
-  const moved = updated.filter((n) => before.get(n) !== after.get(n));
-  current.push(...updated.filter((n) => !moved.includes(n)));
+  const names = (o) => res.filter((r) => r.outcome === o).map((r) => r.name);
+  const moved = names('updated'), current = names('current'), diverged = names('diverged');
+  const failed = res
+    .filter((r) => r.outcome === 'checked-out' || r.outcome === 'failed')
+    .map((r) => (r.outcome === 'checked-out' ? `${r.name} is checked out${r.name === currentBranch()?.name ? '' : ' in another worktree'}` : `${r.name}: ${r.detail}`));
   if (moved.length) toast(moved.length === 1 ? `Fast-forwarded ${moved[0]} (${short(before.get(moved[0]))} → ${short(after.get(moved[0]))})` : `Fast-forwarded ${plural(moved.length, 'branch')}`, 'ok');
   if (current.length) toast(current.length === 1 ? `${current[0]} is already up to date` : `${plural(current.length, 'branch')} already up to date`);
   if (diverged.length)
     toast(`Can't fast-forward ${diverged.join(', ')}: ${diverged.length === 1 ? 'it has' : 'they have'} local commits that aren't upstream. Check out and merge or rebase instead.`, 'err');
-  if (failed.length) toast(failed.join('\n'), 'err');
+  if (failed.length) toast(explainGitError(failed.join('\n')), 'err');
 }
 
 async function newBranchAt(sha) {

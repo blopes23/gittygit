@@ -27,7 +27,7 @@ See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering n
 - Undo (toast button or ⌘Z) for branch/tag/stash/remote-branch deletes, resets, discards, amends and rebases
 - Toolbar: pull, push (sets upstream on first push), fetch, branch, stash, pop, open in Terminal/Finder
 - Context menus: checkout, merge, rebase, cherry-pick, revert, reset soft/mixed/hard, tag, delete branch
-- Live refresh via FSEvents (`notify`) when files or refs change
+- Live refresh via FSEvents (`notify`) when files or refs change; changes git ignores (build output, `node_modules`) don't trigger it, and the commit graph is only reloaded when refs or HEAD move
 - Find commits by message, author or SHA (⌘F); ⌘O open; ⌘R refresh; ⌘↵ commit
 
 ## Build
