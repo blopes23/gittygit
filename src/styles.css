@@ -389,7 +389,7 @@ button:disabled { opacity: .45; }
 
 /* ------------------------------------------------------------ updates */
 #update-banner {
-  position: fixed; left: 16px; bottom: 16px; z-index: 55; width: 320px;
+  position: fixed; left: 16px; bottom: 16px; z-index: 55; width: 380px;
   display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
   background: var(--bg-3); border: 1px solid var(--border); border-left: 3px solid var(--accent);
   border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); font-size: 12px;
@@ -397,7 +397,7 @@ button:disabled { opacity: .45; }
 #update-banner[hidden] { display: none; }
 #update-banner small { color: var(--text-dim); }
 #update-banner details summary { cursor: pointer; color: var(--accent); }
-.upd-notes { white-space: pre-wrap; max-height: 160px; overflow-y: auto; margin-top: 6px; color: var(--text-dim); user-select: text; -webkit-user-select: text; }
+.upd-notes { max-height: 220px; overflow-y: auto; margin-top: 6px; color: var(--text-dim); user-select: text; -webkit-user-select: text; }
 .upd-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .upd-actions button { padding: 5px 12px; }
 .upd-bar { height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; }
@@ -460,3 +460,6 @@ button:disabled { opacity: .45; }
 .op-state.pending { color: var(--orange); }
 .op-state.ready { color: var(--green); }
 .op-acts { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
+.upd-list { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; }
+.upd-list li { color: var(--text); }
+.upd-list li.sub { margin-left: 14px; color: var(--text-dim); list-style: circle; }

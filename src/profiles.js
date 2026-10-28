@@ -150,6 +150,10 @@ async function activateTab(i) {
   $('#welcome').hidden = true;
   $('#layout').hidden = false;
   renderTabs();
+  // Touch the repo with a single git command first: if macOS needs to ask for folder
+  // access (Desktop, Documents…), it asks once here instead of once per parallel command.
+  await invoke('resolve_repo', { path: root }).catch(() => {});
+  if (S.repo !== root) return;
   invoke('watch_repo', { path: root }).catch(() => {});
   await busy(refresh);
   if (S.repo === root) $('#graph-scroll').scrollTop = view.scrollTop || 0;

@@ -4,6 +4,20 @@
 
 const UPD = { info: null, installing: false, dismissed: null };
 
+/** Release notes are generated from commit messages as "- item" / "  - sub-item" lines. */
+function notesHtml(notes) {
+  const items = notes
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => {
+      const sub = /^\s{2,}-\s+/.test(l);
+      const text = l.replace(/^\s*[-*]\s+/, '');
+      return `<li class="${sub ? 'sub' : ''}">${esc(text)}</li>`;
+    })
+    .join('');
+  return `<ul class="upd-list">${items}</ul>`;
+}
+
 function renderUpdateBanner(state = 'available', pct = null) {
   const el = $('#update-banner');
   const info = UPD.info;
@@ -17,7 +31,7 @@ function renderUpdateBanner(state = 'available', pct = null) {
   }
   el.innerHTML = `<b>Gittygit ${esc(info.version)} is available</b>
     <small>You have ${esc(info.current)}${info.date ? ` · released ${esc(info.date)}` : ''}</small>
-    ${info.notes ? `<details><summary>What's new</summary><div class="upd-notes">${esc(info.notes)}</div></details>` : ''}
+    ${info.notes ? `<details open><summary>What's new</summary><div class="upd-notes">${notesHtml(info.notes)}</div></details>` : ''}
     <div class="upd-actions"><button class="ghost" data-upd="later">Later</button><button class="primary" data-upd="install">Restart &amp; update</button></div>`;
 }
 

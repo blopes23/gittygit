@@ -15,6 +15,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags + history for the release notes
 
       - uses: actions/setup-node@v7
         with:
@@ -31,23 +33,48 @@ jobs:
 
       - run: npm ci
 
+      - name: Release notes from commits since the previous tag
+        id: notes
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            echo 'body<<NOTES_EOF'
+            git log --no-merges --format='%x1e%s%x1f%b' "${prev:+$prev..}${GITHUB_REF_NAME}" | node scripts/release-notes.mjs
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # A stable signing certificate keeps the app's identity the same across updates, so
+      # macOS remembers folder-access permissions instead of asking again after each update.
+      - name: Use code-signing certificate (if configured)
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$CERT" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::warning::No signing certificate secrets; building ad-hoc signed (macOS will re-ask for folder access after updates)."
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # With an Apple Developer account, add these secrets to sign + notarize
-          # (removes the Gatekeeper warning on other Macs):
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # With an Apple Developer account, a Developer ID certificate in the secrets above plus
+          # these enables notarization (removes the "Open Anyway" step on other Macs):
           # APPLE_ID: ${{ secrets.APPLE_ID }}
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Gittygit ${{ github.ref_name }}
-          releaseBody: 'Install: download the .dmg below. Existing installs update themselves (Gittygit → Check for Updates…).'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

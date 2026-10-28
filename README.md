@@ -63,4 +63,17 @@ One-time setup — repository secrets (Settings → Secrets and variables → Ac
 - `TAURI_SIGNING_PRIVATE_KEY` — contents of `~/.tauri/gittygit.key`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — `security find-generic-password -s gittygit-updater-key-password -w`
 
-Keep `~/.tauri/gittygit.key` backed up: without it, installed copies can't receive updates.
+- `APPLE_CERTIFICATE` — `base64 -i ~/.tauri/gittygit-signing.p12`
+- `APPLE_CERTIFICATE_PASSWORD` — `security find-generic-password -s gittygit-signing-p12-password -w`
+- `APPLE_SIGNING_IDENTITY` — `Gittygit Self-Signed`
+
+The last three give every build the same code-signing identity, so macOS keeps folder-access
+permissions (Desktop, Documents…) across updates instead of asking again. Local builds use the
+same certificate from the login keychain.
+
+Release notes ("What's new" in the app) are generated from the commit messages since the
+previous tag: each commit subject becomes a bullet, `- ` lines in its body become sub-bullets.
+
+Back up `~/.tauri/gittygit.key`, `~/.tauri/gittygit-signing.p12` and both Keychain passwords:
+without the update key installed copies can't receive updates, and a new signing certificate
+makes macOS ask for folder access once more.
