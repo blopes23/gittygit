@@ -562,3 +562,21 @@ button:disabled { opacity: .45; }
 .diff-lines.virtual .vrow { position: absolute; left: 0; right: 0; height: 19px; }
 .diff-lines.virtual .dl { height: 19px; line-height: 19px; }
 .diff-lines.virtual .hunk { height: 19px; line-height: 19px; padding: 0 12px; }
+
+/* ------------------------------------------------------------ graph column sizing */
+#center { container: center / inline-size; }
+#graph-header .c-graph { position: relative; }
+.col-resize { position: absolute; right: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
+.col-resize:hover { background: color-mix(in srgb, var(--accent) 50%, transparent); }
+/* Lanes beyond a capped (or hand-set) width fade out instead of squeezing the message. */
+#center.graph-clipped .row .c-graph { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); }
+.c-date .d-short { display: none; }
+@container center (max-width: 700px) {
+  #graph-header, .row { grid-template-columns: 140px var(--graph-w, 80px) 1fr 64px; }
+  .c-author { display: none; }
+  .c-date .d-long { display: none; }
+  .c-date .d-short { display: inline; }
+}
+@container center (max-width: 520px) {
+  #graph-header, .row { grid-template-columns: 96px var(--graph-w, 80px) 1fr 52px; }
+}

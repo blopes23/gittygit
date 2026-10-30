@@ -275,6 +275,18 @@ function fmtDate(t) {
 }
 const fmtFull = (t) => new Date(t * 1000).toLocaleString();
 
+/** Compact date for narrow windows: "now", "5m", "17h", "3d", "15 Oct", "15/10/25". */
+function fmtShort(t) {
+  const d = new Date(t * 1000);
+  const s = (Date.now() - d.getTime()) / 1000;
+  if (s < 60) return 'now';
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  if (s < 86400 * 7) return `${Math.floor(s / 86400)}d`;
+  if (d.getFullYear() === new Date().getFullYear()) return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'numeric', year: '2-digit' });
+}
+
 function hashHue(s) {
   let h = 0;
   for (const ch of s || '') h = (h * 31 + ch.charCodeAt(0)) | 0;
@@ -809,13 +821,51 @@ async function newBranchAt(sha) {
 // ------------------------------------------------------------------ graph
 
 function layoutGraph() {
-  const lanes = Math.max(1, S.graph?.max_lanes || 1);
-  S.graphW = Math.max(60, Math.min(320, LANE_X0 * 2 + (lanes - 1) * LANE_W));
-  $('#center').style.setProperty('--graph-w', `${S.graphW}px`);
+  S.graphW = 0; // new graph (or repo): fit the width right away
   $('#graph-spacer').style.height = `${(S.rows.length + (S.graph?.has_more ? 1 : 0)) * ROW_H}px`;
 }
 
 const lx = (c) => LANE_X0 + c * LANE_W;
+
+// ---- graph column width
+// Sized to the lanes the rendered rows (visible ± buffer) actually use, not the busiest stretch
+// of loaded history, capped at a share of the pane so commit messages keep room. Widening is
+// immediate; narrowing waits until scrolling stops so text doesn't shift while reading. A width
+// set by dragging the header edge overrides all of this (per repo; double-click to reset).
+
+const GRAPH_MIN = 40;
+const GRAPH_SHARE = 0.35;
+const lanesWidth = (n) => Math.max(GRAPH_MIN, LANE_X0 * 2 + (n - 1) * LANE_W);
+const graphWidths = load('kl.graphW', {});
+let shrinkTimer;
+
+function graphCap() {
+  return Math.max(GRAPH_MIN, Math.floor($('#graph-scroll').clientWidth * GRAPH_SHARE));
+}
+
+function setGraphW(w, clipped) {
+  $('#center').classList.toggle('graph-clipped', clipped);
+  if (w === S.graphW) return false;
+  S.graphW = w;
+  $('#center').style.setProperty('--graph-w', `${w}px`);
+  return true;
+}
+
+/** Fit the graph column to rows first..last; returns true when the width changed. */
+function fitGraph(first, last, now = false) {
+  let span = 1;
+  for (let i = first; i < last; i++) span = Math.max(span, S.rows[i].span || 1);
+  const need = lanesWidth(span);
+  const user = graphWidths[S.repo];
+  if (user) return setGraphW(Math.min(user, Math.floor($('#graph-scroll').clientWidth * 0.6)), need > user);
+  const target = Math.min(need, graphCap());
+  const clipped = need > target;
+  clearTimeout(shrinkTimer);
+  if (target >= S.graphW || now || !S.graphW) return setGraphW(target, clipped);
+  // Narrowing by less than a lane isn't worth moving the text for.
+  if (S.graphW - target > LANE_W) shrinkTimer = setTimeout(() => setGraphW(target, clipped) && renderRows(), 300);
+  return false;
+}
 
 function graphSvg(r) {
   const ys = [0, ROW_H / 2, ROW_H];
@@ -838,7 +888,8 @@ function graphSvg(r) {
   else
     node = `<circle cx="${cx}" cy="${cy}" r="9" fill="${col}" stroke="#1b1d23" stroke-width="1.5"/>` +
       `<text x="${cx}" y="${cy + 3}" text-anchor="middle" font-size="8" font-weight="700" fill="#fff">${esc(initials(r.author))}</text>`;
-  return `<svg width="${S.graphW}" height="${ROW_H}">${paths}${node}</svg>`;
+  const who = wip ? '' : `<title>${esc(r.author)}</title>`;
+  return `<svg width="${S.graphW}" height="${ROW_H}">${paths}<g>${who}${node}</g></svg>`;
 }
 
 function parseRefs(r) {
@@ -907,7 +958,7 @@ function rowHtml(r, i) {
     <div class="c-graph">${graphSvg(r)}</div>
     <div class="c-msg" title="${wip ? '' : esc(r.subject)}">${msg}</div>
     <div class="c-author">${esc(r.author)}</div>
-    <div class="c-date" title="${wip ? '' : fmtFull(r.time)}">${wip ? '' : fmtDate(r.time)}</div>
+    <div class="c-date" title="${wip ? '' : fmtFull(r.time)}">${wip ? '' : `<span class="d-long">${fmtDate(r.time)}</span><span class="d-short">${fmtShort(r.time)}</span>`}</div>
   </div>`;
 }
 
@@ -926,6 +977,7 @@ function renderRows(force = true) {
     if (vFirst - f >= 5 && l - vLast >= 5) return;
   }
   renderedRange = key;
+  fitGraph(first, last);
   let html = '';
   for (let i = first; i < last; i++) html += rowHtml(S.rows[i], i);
   if (S.graph?.has_more && last >= total) {
@@ -947,7 +999,19 @@ async function loadMore() {
   }
 }
 // Render synchronously in the scroll event so fast wheel/trackpad scrolls never paint empty rows.
-$('#graph-scroll').addEventListener('scroll', () => renderRows(false), { passive: true });
+$('#graph-scroll').addEventListener(
+  'scroll',
+  () => {
+    renderRows(false);
+    // Narrowing waits until scrolling has stopped for 300 ms.
+    clearTimeout(shrinkTimer);
+    shrinkTimer = setTimeout(() => {
+      const [f, l] = renderedRange.split(':').map(Number);
+      if (fitGraph(f, l, true)) renderRows();
+    }, 300);
+  },
+  { passive: true },
+);
 new ResizeObserver(() => S.repo && renderRows()).observe($('#graph-scroll'));
 
 function select(sha, scroll = false) {
@@ -1070,6 +1134,33 @@ async function discardAll() {
     await refresh();
   });
 }
+
+// Drag the Graph header's right edge to set its width for this repo; double-click for automatic.
+$('#graph-header').addEventListener('mousedown', (e) => {
+  if (!e.target.closest('.col-resize')) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const start = S.graphW;
+  const max = Math.floor($('#graph-scroll').clientWidth * 0.6);
+  const move = (ev) => {
+    graphWidths[S.repo] = Math.max(GRAPH_MIN, Math.min(max, start + ev.clientX - startX));
+    renderRows();
+  };
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+    save('kl.graphW', graphWidths);
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+$('#graph-header').addEventListener('dblclick', (e) => {
+  if (!e.target.closest('.col-resize')) return;
+  delete graphWidths[S.repo];
+  save('kl.graphW', graphWidths);
+  S.graphW = 0;
+  renderRows();
+});
 
 // keyboard navigation in graph
 $('#graph-scroll').addEventListener('keydown', (e) => {

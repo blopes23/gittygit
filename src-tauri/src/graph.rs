@@ -27,6 +27,9 @@ pub struct Row {
     pub col: u16,
     pub color: u16,
     pub edges: Vec<Edge>,
+    /// Lanes this row draws in (rightmost lane + 1); the UI sizes the graph column to the
+    /// rows on screen instead of the busiest stretch of history.
+    pub span: u16,
 }
 
 fn free_slot(lanes: &mut Vec<Option<u32>>, avoid: usize) -> usize {
@@ -136,6 +139,7 @@ pub fn layout(commits: Vec<RawCommit>) -> (Vec<Row>, usize) {
         }
 
         max_lanes = max_lanes.max(before.len()).max(lanes.len()).max(col + 1);
+        let span = edges.iter().map(|e| e[0].max(e[2])).max().unwrap_or(0).max(col as u16) + 1;
         rows.push(Row {
             sha: c.sha,
             parents: c.parents,
@@ -147,6 +151,7 @@ pub fn layout(commits: Vec<RawCommit>) -> (Vec<Row>, usize) {
             col: col as u16,
             color: node_color,
             edges,
+            span,
         });
     }
     (rows, max_lanes)
@@ -179,5 +184,6 @@ mod tests {
         assert_eq!(rows[3].col, 0);
         // A receives the converging line from lane 1
         assert!(rows[3].edges.iter().any(|e| e[0] == 1 && e[2] == 0));
+        assert_eq!(rows.iter().map(|r| r.span).collect::<Vec<_>>(), [2, 2, 2, 2]);
     }
 }
