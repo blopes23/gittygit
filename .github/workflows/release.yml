@@ -27,9 +27,13 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      # Restores the cache the CI workflow saves on main (see ci.yml). Tag runs don't save their
+      # own: no later run could restore it.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          shared-key: macos-universal
+          save-if: false
 
       - run: npm ci
 

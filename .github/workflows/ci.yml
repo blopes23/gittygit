@@ -1,0 +1,46 @@
+name: CI
+
+# Runs the Rust tests on every push to main and compiles the app exactly like a release
+# (universal, release profile, same Tauri features), then saves the Rust build cache.
+# Release runs are triggered by tags, and GitHub only lets a tag run restore caches made on
+# its own tag or on the default branch, so this is what makes release builds reuse compiled
+# dependencies instead of rebuilding everything (~10 min -> a few).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      # Same shared key as the release workflow, which restores this cache.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          shared-key: macos-universal
+
+      - run: npm ci
+
+      # The watcher timing test depends on FSEvents latency, which is unreliable on shared runners.
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test -- --skip steady_writes_still_refresh
+
+      - name: Compile like a release (no bundling or signing)
+        run: npx tauri build --target universal-apple-darwin --no-bundle

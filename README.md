@@ -11,7 +11,7 @@ See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering n
   - expected remote owners per profile: warns when a repo is opened or pushed under the wrong profile
   - optional per-repo "use profile in terminal git" writes `core.sshCommand` + `user.*` to that repo's `.git/config`
   - stored in `~/Library/Application Support/dev.gittygit.desktop/profiles.json` (key paths only, never key contents)
-- Commit graph of all branches (lane layout in Rust, virtualized rows, branch/tag pills, WIP node); older history loads in pages of 5000 as you scroll
+- Commit graph of all branches (lane layout in Rust, virtualized rows, branch/tag pills, WIP node); older history loads in pages of 5000 as you scroll; the graph column fits the lanes on screen (drag its header edge to set a width, double-click to reset) and narrow windows hide the Author column
 - Sidebar: local / remote branches with ahead/behind, tags, stashes
 - Pull into a branch without checking it out (right-click → "Pull … (fast-forward)", works on multi-selection too)
 - Multi-select local branches (⌘-click, ⇧-click, ⌘A) and delete them in one go (⌫ or right-click); unmerged ones get a single force-delete prompt
@@ -64,6 +64,10 @@ git commit -am "Release v0.2.0" && git tag v0.2.0 && git push origin main v0.2.0
 ```
 The `Release` GitHub Action builds a universal (Apple silicon + Intel) app and publishes the
 `.dmg`, the signed update archive and `latest.json`.
+
+The `CI` action runs on every push to `main`: Rust tests, then a release-identical compile that
+saves the Rust build cache. Release runs (triggered by tags) can only restore caches from `main`,
+so a release is fastest when CI for that commit has finished first.
 
 One-time setup — repository secrets (Settings → Secrets and variables → Actions):
 - `TAURI_SIGNING_PRIVATE_KEY` — contents of `~/.tauri/gittygit.key`
