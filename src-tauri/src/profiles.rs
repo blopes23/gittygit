@@ -55,7 +55,7 @@ impl Store {
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("KL_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("GITTYGIT_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
@@ -64,28 +64,6 @@ pub fn config_dir() -> PathBuf {
 
 fn store_path() -> PathBuf {
     config_dir().join("profiles.json")
-}
-
-/// Where profiles lived before the app was renamed from KrakenLite.
-fn legacy_store_path() -> Option<PathBuf> {
-    if std::env::var_os("KL_CONFIG_DIR").is_some() {
-        return None;
-    }
-    let home = PathBuf::from(std::env::var_os("HOME")?);
-    Some(home.join("Library/Application Support/dev.krakenlite.desktop/profiles.json"))
-}
-
-/// Copy profiles from the pre-rename location once, leaving the original in place.
-fn migrate_legacy(path: &Path) {
-    if path.exists() {
-        return;
-    }
-    if let Some(old) = legacy_store_path().filter(|p| p.is_file()) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::copy(old, path);
-    }
 }
 
 fn default_store() -> Store {
@@ -103,7 +81,6 @@ fn default_store() -> Store {
 
 pub fn load() -> Store {
     let path = store_path();
-    migrate_legacy(&path);
     let mut store = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<Store>(&text) {
             Ok(s) => s,

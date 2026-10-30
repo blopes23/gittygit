@@ -110,7 +110,7 @@ function showWelcome() {
   $('#welcome-title').textContent = p.name;
   $('#welcome-sub').textContent = p.tabs.length ? '' : 'Open or clone a repository to add it to this profile.';
   const inAnyProfile = new Set(S.store.profiles.flatMap((q) => q.tabs));
-  const list = load('kl.recent', []).filter((r) => !inAnyProfile.has(r.root));
+  const list = load('gg.recent', []).filter((r) => !inAnyProfile.has(r.root));
   $('#recent-title').hidden = !list.length;
   $('#recent-list').innerHTML = list
     .map((r) => `<li data-root="${esc(r.root)}"><b>${esc(r.name)}</b><small>${esc(r.root)}</small></li>`)
@@ -120,9 +120,9 @@ function showWelcome() {
 }
 
 function rememberRecent(root) {
-  const list = load('kl.recent', []).filter((r) => r.root !== root);
+  const list = load('gg.recent', []).filter((r) => r.root !== root);
   list.unshift({ root, name: baseName(root) });
-  save('kl.recent', list.slice(0, 20));
+  save('gg.recent', list.slice(0, 20));
 }
 
 // ------------------------------------------------------------------ tabs
@@ -380,7 +380,7 @@ async function moveRepo(root, targetId) {
 
 $('#tab-add').addEventListener('click', (e) => {
   const inAnyProfile = new Set(S.store.profiles.flatMap((q) => q.tabs));
-  const recents = load('kl.recent', []).filter((r) => !inAnyProfile.has(r.root)).slice(0, 8);
+  const recents = load('gg.recent', []).filter((r) => !inAnyProfile.has(r.root)).slice(0, 8);
   const r = e.currentTarget.getBoundingClientRect();
   showMenu({ clientX: r.left, clientY: r.bottom + 4 }, [
     ['Open repository…  ⌘O', pickAndOpen],
@@ -636,7 +636,7 @@ document.addEventListener('keydown', (e) => {
   S.store = await invoke('get_profiles');
   if (S.store.fresh) {
     // First launch with profiles: carry over the last opened repository.
-    const last = load('kl.last', null);
+    const last = load('gg.last', null);
     if (last) {
       const p = activeProfile();
       p.tabs = [last];

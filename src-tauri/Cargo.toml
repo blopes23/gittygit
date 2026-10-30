@@ -1,7 +1,8 @@
 [package]
 name = "gittygit"
 version = "0.1.7"
-description = "A lightweight GitKraken-style Git client"
+description = "A fast, lightweight Git client for macOS"
+license = "MIT"
 edition = "2021"
 
 [build-dependencies]

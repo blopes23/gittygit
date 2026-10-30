@@ -1,8 +1,7 @@
 //! Thin wrapper around the git CLI.
 //!
-//! GitKraken ships its own git (app.asar.unpacked/git) and drives it through a
-//! Rust spawn server, with libgit2 (nodegit) for hot read paths. We keep a single
-//! engine: the user's git binary, run off the main thread with prompts disabled.
+//! A single engine: the user's own git binary, run off the main thread with
+//! prompts disabled and output forced to English so it can be parsed.
 
 use serde::Serialize;
 use std::path::Path;

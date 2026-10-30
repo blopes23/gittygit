@@ -19,7 +19,7 @@ http.createServer(async (req, res) => {
   if (req.url === '/__invoke') {
     let body = ''; for await (const c of req) body += c;
     const { cmd, args } = JSON.parse(body);
-    execFile(bin, ['--rpc', cmd, JSON.stringify(args)], { maxBuffer: 1 << 28, env: { ...process.env, KL_CONFIG_DIR: process.env.KL_CONFIG_DIR || path.join(path.dirname(bin), 'kl-config') } }, (e, out) => {
+    execFile(bin, ['--rpc', cmd, JSON.stringify(args)], { maxBuffer: 1 << 28, env: { ...process.env, GITTYGIT_CONFIG_DIR: process.env.GITTYGIT_CONFIG_DIR || path.join(path.dirname(bin), 'test-config') } }, (e, out) => {
       res.setHeader('content-type', 'application/json'); res.end(out || JSON.stringify({ err: String(e) }));
     });
     return;

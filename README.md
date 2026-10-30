@@ -1,7 +1,6 @@
 # Gittygit
 
-A GitKraken-style Git client for macOS on Apple silicon, built with **Tauri 2** (Rust + WKWebView).
-See [GITKRAKEN-ANALYSIS.md](GITKRAKEN-ANALYSIS.md) for the reverse-engineering notes it is based on.
+A fast, native-feeling Git client for macOS (Apple silicon and Intel), built with **Tauri 2** (Rust + WKWebView).
 
 ## Features
 - **Profiles** (e.g. Work / Personal), each with its own SSH key, git author and set of repository tabs
@@ -87,3 +86,6 @@ previous tag: each commit subject becomes a bullet, `- ` lines in its body becom
 Back up `~/.tauri/gittygit.key`, `~/.tauri/gittygit-signing.p12` and both Keychain passwords:
 without the update key installed copies can't receive updates, and a new signing certificate
 makes macOS ask for folder access once more.
+
+## License
+[MIT](LICENSE): free to use, copy, modify and share, as long as the copyright notice stays with the code.

@@ -143,7 +143,7 @@ fn clone_repo(profile_id: String, url: String, parent: String) -> R<RepoInfo> {
     resolve(&dest_s)
 }
 
-/// Repository passed on the command line (`gittygit /path/to/repo`), like `gitkraken -p`.
+/// Repository passed on the command line (`gittygit /path/to/repo`).
 #[tauri::command]
 fn initial_repo() -> Option<String> {
     std::env::args().skip(1).find(|a| !a.starts_with('-') && std::path::Path::new(a).is_dir())
@@ -175,7 +175,7 @@ fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
     commits.truncate(limit);
     let (head_sha, head_branch) = git::head(repo);
     if dirty {
-        // Synthetic work-in-progress node on top of HEAD, like GitKraken's "// WIP" row.
+        // Synthetic work-in-progress node on top of HEAD (the "// WIP" row).
         commits.insert(
             0,
             git::RawCommit {

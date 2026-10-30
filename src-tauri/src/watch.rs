@@ -1,4 +1,4 @@
-//! Working-tree watcher (GitKraken uses the `nsfw` native addon for this).
+//! Working-tree watcher.
 //! Changes are batched and surfaced to the UI as a single `repo-changed` event.
 //!
 //! A batch ends after 400 ms without events, or 1.5 s after it started so a long stream of

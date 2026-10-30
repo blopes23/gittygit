@@ -51,7 +51,7 @@ const S = {
   matchSet: new Set(),
   matchPos: -1,
   graphW: 80,
-  sbClosed: new Set(load('kl.sbClosed', [])),
+  sbClosed: new Set(load('gg.sbClosed', [])),
   sbSel: new Set(), // multi-selected local branch names
   sbAnchor: null, // anchor for shift-click ranges
   busy: 0,
@@ -66,7 +66,8 @@ const esc = (s) =>
 
 function load(key, fallback) {
   try {
-    const v = localStorage.getItem(key);
+    // Settings saved before the "gg." prefix used "kl.".
+    const v = localStorage.getItem(key) ?? localStorage.getItem(key.replace(/^gg\./, 'kl.'));
     return v ? JSON.parse(v) : fallback;
   } catch {
     return fallback;
@@ -377,7 +378,7 @@ function scheduleRefresh() {
 function suggestCommitGraph() {
   const g = S.graph;
   const hint = $('#perf-hint');
-  const dismissed = load('kl.cgDismissed', []);
+  const dismissed = load('gg.cgDismissed', []);
   const show = g && !g.commit_graph && g.load_ms > 300 && !dismissed.includes(S.repo);
   hint.hidden = !show;
   if (!show) return;
@@ -389,7 +390,7 @@ $('#perf-hint').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-cg]');
   if (!b) return;
   if (b.dataset.cg === 'no') {
-    save('kl.cgDismissed', [...load('kl.cgDismissed', []), S.repo]);
+    save('gg.cgDismissed', [...load('gg.cgDismissed', []), S.repo]);
     $('#perf-hint').hidden = true;
     return;
   }
@@ -556,7 +557,7 @@ function renderSidebar() {
   $('#sidebar').querySelectorAll('details').forEach((d) =>
     d.addEventListener('toggle', () => {
       d.open ? S.sbClosed.delete(d.dataset.key) : S.sbClosed.add(d.dataset.key);
-      save('kl.sbClosed', [...S.sbClosed]);
+      save('gg.sbClosed', [...S.sbClosed]);
     }),
   );
 }
@@ -836,7 +837,7 @@ const lx = (c) => LANE_X0 + c * LANE_W;
 const GRAPH_MIN = 40;
 const GRAPH_SHARE = 0.35;
 const lanesWidth = (n) => Math.max(GRAPH_MIN, LANE_X0 * 2 + (n - 1) * LANE_W);
-const graphWidths = load('kl.graphW', {});
+const graphWidths = load('gg.graphW', {});
 let shrinkTimer;
 
 function graphCap() {
@@ -912,7 +913,7 @@ function parseRefs(r) {
     const remote = remotes.find((n) => s.startsWith(n + '/'));
     out.push({ kind: remote ? 'remote' : 'local', name: s, head, remote });
   }
-  // Fold "origin/main" into a local "main" pill, as GitKraken does.
+  // Fold "origin/main" into a local "main" pill when both point at the same commit.
   for (const p of out) {
     if (p.kind !== 'local') continue;
     const twin = out.find((q) => q.kind === 'remote' && q.name === `${q.remote}/${p.name}`);
@@ -1149,7 +1150,7 @@ $('#graph-header').addEventListener('mousedown', (e) => {
   const up = () => {
     window.removeEventListener('mousemove', move);
     window.removeEventListener('mouseup', up);
-    save('kl.graphW', graphWidths);
+    save('gg.graphW', graphWidths);
   };
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', up);
@@ -1157,7 +1158,7 @@ $('#graph-header').addEventListener('mousedown', (e) => {
 $('#graph-header').addEventListener('dblclick', (e) => {
   if (!e.target.closest('.col-resize')) return;
   delete graphWidths[S.repo];
-  save('kl.graphW', graphWidths);
+  save('gg.graphW', graphWidths);
   S.graphW = 0;
   renderRows();
 });
@@ -1807,7 +1808,7 @@ document.addEventListener('contextmenu', (e) => {
 // ------------------------------------------------------------------ resizers
 
 const layoutEl = $('#layout');
-const widths = load('kl.widths', {});
+const widths = load('gg.widths', {});
 if (widths.sidebar) layoutEl.style.setProperty('--sidebar-w', `${widths.sidebar}px`);
 if (widths.detail) layoutEl.style.setProperty('--detail-w', `${widths.detail}px`);
 document.querySelectorAll('.resizer').forEach((rz) =>
@@ -1825,7 +1826,7 @@ document.querySelectorAll('.resizer').forEach((rz) =>
     const up = () => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
-      save('kl.widths', widths);
+      save('gg.widths', widths);
       renderRows();
     };
     window.addEventListener('mousemove', move);
