@@ -348,6 +348,83 @@ fn restore_files(profile_id: String, repo: String, snapshot: git::Snapshot) -> R
     git::restore(&repo, &snapshot, &profiles::ctx(profile))
 }
 
+/// Tags on a remote, to mark which local tags haven't been pushed.
+#[tauri::command(async)]
+fn remote_tags(profile_id: String, repo: String, remote: String) -> R<Vec<String>> {
+    let store = profiles::load();
+    let profile = store.for_repo(&profile_id, &repo)?;
+    git::remote_tags(&repo, &remote, &profiles::ctx(profile))
+}
+
+#[derive(Serialize)]
+struct Remote {
+    name: String,
+    url: String,
+    /// SSH form of an HTTPS URL, offered as the fix for HTTPS sign-in failures.
+    ssh_url: Option<String>,
+}
+
+#[tauri::command(async)]
+fn get_remotes(repo: String) -> Vec<Remote> {
+    git::remote_urls(&repo)
+        .into_iter()
+        .map(|(name, url)| Remote { ssh_url: git::https_to_ssh(&url), name, url })
+        .collect()
+}
+
+#[tauri::command(async)]
+fn set_remote_url(profile_id: String, repo: String, name: String, url: String) -> R<()> {
+    let store = profiles::load();
+    let ctx = profiles::ctx(store.for_repo(&profile_id, &repo)?);
+    if !git::remote_urls(&repo).iter().any(|(n, _)| n == &name) {
+        return Err(format!("no remote named {name}"));
+    }
+    let ok = (url.starts_with("git@") || url.starts_with("ssh://") || url.starts_with("https://")) && !url.contains(char::is_whitespace);
+    if !ok {
+        return Err(format!("unsupported remote URL {url}"));
+    }
+    git::exec(&repo, &["remote", "set-url", &name, &url], &[0], &ctx).map(|_| ())
+}
+
+#[tauri::command(async)]
+fn store_https_credential(profile_id: String, repo: String, host: String, username: String, token: String) -> R<()> {
+    profiles::load().for_repo(&profile_id, &repo)?;
+    git::store_credential(&repo, &host, &username, &token)
+}
+
+/// Facts for bug reports (Gittygit → Copy Diagnostics); paths under $HOME are shortened to ~.
+#[tauri::command(async)]
+fn diagnostics(app: AppHandle) -> serde_json::Value {
+    let sh = |cmd: &str, args: &[&str]| {
+        std::process::Command::new(cmd).args(args).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    };
+    serde_json::json!({
+        "app": app.package_info().version.to_string(),
+        "macos": sh("sw_vers", &["-productVersion"]),
+        "arch": std::env::consts::ARCH,
+        "git": git::git_bin(),
+        "git_version": sh(git::git_bin(), &["--version"]),
+        "profiles": profiles::load().profiles.len(),
+    })
+}
+
+/// Append a failed git command's message to ~/Library/Logs/Gittygit/gittygit.log (kept under 1 MB).
+#[tauri::command(async)]
+fn log_error(message: String) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = PathBuf::from(home).join("Library/Logs/Gittygit");
+    let path = dir.join("gittygit.log");
+    let _ = std::fs::create_dir_all(&dir);
+    if std::fs::metadata(&path).map(|m| m.len() > 1 << 20).unwrap_or(false) {
+        let _ = std::fs::rename(&path, dir.join("gittygit.1.log"));
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "[{stamp}] {}", message.replace('\n', "\n  "));
+    }
+}
+
 #[tauri::command(async)]
 fn reveal(repo: String, target: String, path: Option<String>) -> R<()> {
     let mut cmd = std::process::Command::new("open");
@@ -441,6 +518,12 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
             let snap = serde_json::from_value(get("snapshot").unwrap_or_default()).map_err(|e| e.to_string())?;
             json!(restore_files(s("profile_id"), repo, snap)?)
         }
+        "remote_tags" => to_value(remote_tags(s("profile_id"), repo, s("remote"))?).unwrap(),
+        "get_remotes" => to_value(get_remotes(repo)).unwrap(),
+        "set_remote_url" => json!(set_remote_url(s("profile_id"), repo, s("name"), s("url"))?),
+        "store_https_credential" => json!(store_https_credential(s("profile_id"), repo, s("host"), s("username"), s("token"))?),
+        "diagnostics" => json!({ "app": env!("CARGO_PKG_VERSION"), "arch": std::env::consts::ARCH, "git_version": git::run(".", &["--version"]).unwrap_or_default().trim() }),
+        "log_error" => json!(log_error(s("message"))),
         "git_run" => {
             let argv = serde_json::from_value(get("args").unwrap_or_default()).map_err(|e| e.to_string())?;
             json!(git_run(s("profile_id"), repo, argv)?)
@@ -472,14 +555,24 @@ fn main() {
             // Default macOS menu (keeps Edit → Copy/Paste etc.) plus "Check for Updates…".
             let menu = Menu::default(app.handle())?;
             if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.first() {
-                let item = MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?;
-                app_menu.insert(&item, 1)?;
+                let items = [
+                    MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
+                    MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
+                    MenuItem::with_id(app, "diagnostics", "Copy Diagnostics", true, None::<&str>)?,
+                ];
+                for (i, item) in items.iter().enumerate() {
+                    app_menu.insert(item, 1 + i)?;
+                }
             }
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
-                if event.id() == "check-updates" {
-                    let _ = app.emit("menu-check-updates", ());
-                }
+                let name = match event.id().as_ref() {
+                    "check-updates" => "menu-check-updates",
+                    "settings" => "menu-settings",
+                    "diagnostics" => "menu-diagnostics",
+                    _ => return,
+                };
+                let _ = app.emit(name, ());
             });
             #[cfg(debug_assertions)]
             updater::test_auto_update(app.handle());
@@ -520,6 +613,12 @@ fn main() {
             interactive_rebase,
             snapshot_files,
             restore_files,
+            remote_tags,
+            get_remotes,
+            set_remote_url,
+            store_https_credential,
+            diagnostics,
+            log_error,
             reveal,
             updater::check_update,
             updater::install_update

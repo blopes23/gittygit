@@ -21,7 +21,7 @@
       </div>
     </div>
     <div class="tb-group tb-center" data-tauri-drag-region>
-      <button class="act" data-act="pull" title="Pull"><span class="i" data-icon="pull"></span><span>Pull</span><em id="behind-badge"></em></button>
+      <button class="act" data-act="pull" title="Pull"><span class="i" data-icon="pull"></span><span>Pull<span class="act-more" title="Pull options">▾</span></span><em id="behind-badge"></em></button>
       <button class="act" data-act="push" title="Push"><span class="i" data-icon="push"></span><span>Push</span><em id="ahead-badge"></em></button>
       <button class="act" data-act="fetch" title="Fetch all"><span class="i" data-icon="fetch"></span><span>Fetch</span></button>
       <button class="act" data-act="branch" title="New branch"><span class="i" data-icon="branch"></span><span>Branch</span></button>
@@ -111,7 +111,8 @@
   <dialog id="modal">
     <form method="dialog">
       <p id="modal-msg"></p>
-      <input id="modal-input" spellcheck="false" autocomplete="off">
+      <input id="modal-input" spellcheck="false" autocomplete="off" list="modal-list">
+      <datalist id="modal-list"></datalist>
       <menu>
         <button value="cancel" class="ghost">Cancel</button>
         <button value="alt" id="modal-alt" class="ghost" hidden></button>
@@ -121,6 +122,36 @@
   </dialog>
 
   <dialog id="rebase-dlg"></dialog>
+
+  <dialog id="settings-dlg">
+    <form method="dialog" class="st">
+      <h3>Settings</h3>
+      <label class="fld">Fetch in the background
+        <select id="st-fetch">
+          <option value="0">Off</option><option value="1">Every minute</option><option value="2">Every 2 minutes</option>
+          <option value="5">Every 5 minutes</option><option value="10">Every 10 minutes</option><option value="15">Every 15 minutes</option>
+          <option value="30">Every 30 minutes</option>
+        </select></label>
+      <small class="hint">Keeps ahead/behind counts and remote branches current for the open repository, using its profile's SSH key.</small>
+      <label class="fld">Pulling when your branch and its remote both have new commits
+        <select id="st-pull">
+          <option value="ask">Ask (then remember per repository)</option><option value="merge">Merge</option>
+          <option value="rebase">Rebase</option><option value="ff-only">Fast-forward only (stop instead)</option>
+        </select></label>
+      <small class="hint">Repositories with their own choice (Pull ▾) keep it. <a href="#" id="st-reset-pull">Clear per-repository choices</a></small>
+      <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Save</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="token-dlg">
+    <form method="dialog" class="st">
+      <h3>Access token for <span id="tk-host"></span></h3>
+      <p class="hint">Create one on the host (GitHub: Settings → Developer settings → Personal access tokens) with access to this repository. Gittygit hands it straight to git's credential store (the macOS Keychain) and doesn't keep it.</p>
+      <label class="fld">Username <input id="tk-user" spellcheck="false" autocomplete="off"></label>
+      <label class="fld">Token <input id="tk-token" type="password" spellcheck="false" autocomplete="off"></label>
+      <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Save token</button></menu>
+    </form>
+  </dialog>
 
   <dialog id="profiles-dlg">
     <div class="pd">
@@ -172,6 +203,8 @@
   <script src="history.js"></script>
   <script src="rebase.js"></script>
   <script src="profiles.js"></script>
+  <script src="remote.js"></script>
+  <script src="settings.js"></script>
   <script src="updates.js"></script>
 </body>
 </html>

@@ -58,6 +58,8 @@ const S = {
   lineSel: new Set(), // picked diff lines ("hunk:line")
   lineAnchor: null,
   undo: null, // last undoable action, see offerUndo()
+  fetching: null, // promise of a running background fetch
+  remoteTags: new Map(), // repo -> Set of tag names on its default remote (null while loading)
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -87,7 +89,28 @@ function hydrateIcons(root = document) {
   });
 }
 
+// Recent errors (for Copy Diagnostics), also appended to ~/Library/Logs/Gittygit/gittygit.log.
+// Home-folder paths and anything token-like are masked first.
+const ERRORS = [];
+function recordError(msg) {
+  const clean = String(msg)
+    .replace(/\/Users\/[^/\s'"]+/g, '~')
+    .replace(/\b(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]{8,}/g, '$1***')
+    .replace(/(https?:\/\/)[^/\s@]+@/g, '$1***@');
+  ERRORS.push(`${new Date().toISOString()} ${clean}`);
+  if (ERRORS.length > 50) ERRORS.shift();
+  invoke('log_error', { message: clean }).catch(() => {});
+}
+
+// git can't show its username/password prompt inside the app.
+const HTTPS_AUTH = /could not read (?:Username|Password) for '(https:\/\/[^']+)'|Authentication failed for '(https:\/\/[^/']+)/;
+
 function toast(msg, kind = '', action = null) {
+  if (kind === 'err') {
+    recordError(msg);
+    const m = HTTPS_AUTH.exec(String(msg));
+    if (m && !action && typeof fixHttps === 'function') action = { label: 'Fix sign-in…', fn: () => fixHttps(new URL(m[1] || m[2]).host) };
+  }
   const el = document.createElement('div');
   el.className = `toast ${kind}`;
   el.textContent = msg;
@@ -106,6 +129,8 @@ function toast(msg, kind = '', action = null) {
 }
 
 async function busy(fn) {
+  // Don't run a command while a background fetch holds git's locks.
+  if (S.fetching) await S.fetching.catch(() => {});
   S.busy++;
   $('#spinner').hidden = false;
   document.querySelectorAll('.act').forEach((b) => (b.disabled = true));
@@ -168,10 +193,11 @@ async function runGit(fn, okMsg) {
   });
 }
 
-function ask(msg, { input = false, value = '', ok = 'OK', danger = false, placeholder = '', alt = null } = {}) {
+function ask(msg, { input = false, value = '', ok = 'OK', danger = false, placeholder = '', alt = null, list = null } = {}) {
   return new Promise((resolve) => {
     const dlg = $('#modal');
     const inp = $('#modal-input');
+    $('#modal-list').innerHTML = (list || []).map((v) => `<option value="${esc(v)}">`).join('');
     $('#modal-msg').textContent = msg;
     inp.hidden = !input;
     inp.value = value;
@@ -226,6 +252,7 @@ async function runUndo(entry = S.undo) {
   await busy(async () => {
     try {
       await entry.fn();
+      S.remoteTags.delete(entry.repo); // an undo may have pushed or deleted remote refs
       toast(`Undone: ${entry.msg}`, 'ok');
     } catch (e) {
       toast(`Couldn't undo: ${e}`, 'err');
@@ -251,11 +278,12 @@ async function moveHead(fn, okMsg, { undoMode = 'keep', snapshot = null } = {}) 
   const out = await runGit(typeof fn === 'function' ? fn : () => gitRaw(fn));
   if (out === null) return null;
   const after = await revParse('HEAD').catch(() => '');
+  const msgFor = (moved) => (typeof okMsg === 'function' ? okMsg(moved) : okMsg);
   if (!before || !after || (after === before && !snapshot)) {
-    if (okMsg) toast(okMsg, 'ok');
+    if (msgFor(false)) toast(msgFor(false), 'ok');
     return out;
   }
-  offerUndo(okMsg, async () => {
+  offerUndo(msgFor(true), async () => {
     const [now, nowBranch] = [await revParse('HEAD'), (await gitRaw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()];
     if (now !== after || nowBranch !== branch) throw `${branch} has changed since then`;
     await gitRaw(['reset', `--${undoMode}`, before]);
@@ -355,6 +383,7 @@ async function refresh() {
     if (S.hits) applyHits();
     else if (S.matches.length) runSearch($('#search').value, false);
     if (snap.graph) suggestCommitGraph();
+    if (!S.remoteTags.has(repo) && refs.remote_names.length) updateRemoteTags(repo);
   } catch (e) {
     toast(String(e), 'err');
   } finally {
@@ -444,9 +473,7 @@ function defaultRemote() {
 }
 
 const ACTIONS = {
-  async pull() {
-    await git(['pull'], 'Pulled');
-  },
+  pull: () => pull(),
   async push() {
     const b = currentBranch();
     if (!b) return toast('Not on a branch', 'err');
@@ -473,7 +500,7 @@ const ACTIONS = {
     if (rejected === 'diverged') forcePush(b, true);
   },
   async fetch() {
-    await git(['fetch', '--all', '--prune'], 'Fetched all remotes');
+    if ((await git(['fetch', '--all', '--prune'], 'Fetched all remotes')) !== null) fetchSucceeded(S.repo);
   },
   async branch() {
     const base = S.selected && S.selected !== 'WIP' ? S.selected : null;
@@ -500,11 +527,16 @@ const ACTIONS = {
 };
 
 document.querySelectorAll('[data-act]').forEach((b) =>
-  b.addEventListener('click', () => {
+  b.addEventListener('click', (e) => {
     if (!S.repo) return;
+    if (e.target.closest('.act-more')) return pullMenu(e);
     ACTIONS[b.dataset.act]?.();
   }),
 );
+$('[data-act="pull"]').addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (S.repo) pullMenu(e);
+});
 
 // ------------------------------------------------------------------ sidebar
 
@@ -538,7 +570,10 @@ function renderSidebar() {
     .map(([remote, list]) => `<div class="sb-group">${icon('cloud')} ${esc(remote)}</div>` + list.map((rb) => item('remote', rb.name, rb.sha, 'branch')).join(''))
     .join('');
 
-  const tags = r.tags.map((t) => item('tag', t.name, t.sha, 'tag')).join('');
+  const onRemote = S.remoteTags.get(S.repo);
+  const tags = r.tags
+    .map((t) => item('tag', t.name, t.sha, 'tag', onRemote && !onRemote.has(t.name) ? '<span class="badge" title="Not pushed yet">local</span>' : ''))
+    .join('');
   const stashes = r.stashes.map((s) => item('stash', s.message, s.sha, 'stash', '', '').replace('data-name=', `data-index="${s.index}" data-name=`)).join('');
 
   const n = S.sbSel.size;
@@ -685,10 +720,16 @@ function checkoutRemote(remoteName) {
 function refMenu(kind, name, sha) {
   const cur = currentBranch()?.name;
   if (kind === 'tag') {
+    const remote = defaultRemote();
+    const onRemote = S.remoteTags.get(S.repo)?.has(name); // undefined: not known yet
     return [
       ['Copy tag name', () => navigator.clipboard.writeText(name)],
       null,
+      remote && onRemote !== true && [`Push ${name} to ${remote}`, () => pushTags(remote, [name])],
+      remote && ['Push all tags to ' + remote, () => pushTags(remote, null)],
+      null,
       ['Delete tag…', () => deleteTag(name), 'danger'],
+      remote && onRemote !== false && [`Delete ${name} on ${remote}…`, () => deleteRemoteTag(name, remote), 'danger'],
     ];
   }
   if (kind === 'remote') {
@@ -717,6 +758,9 @@ function refMenu(kind, name, sha) {
     isCur && ['Pull', () => ACTIONS.pull()],
     null,
     ['Create branch here…', () => newBranchAt(sha)],
+    br && [`Rename ${name}…`, () => renameBranch(br)],
+    br && [br.upstream ? `Change tracked branch (${br.upstream})…` : 'Track remote branch…', () => trackBranch(br)],
+    br?.upstream && [`Stop tracking ${br.upstream}`, () => git(['branch', '--unset-upstream', name], `${name} no longer tracks ${br.upstream}`)],
     ['Copy branch name', () => navigator.clipboard.writeText(name)],
     null,
     !isCur && [`Delete ${name}…`, () => deleteBranches([name]), 'danger'],
@@ -1783,7 +1827,9 @@ function showMenu(e, items) {
     .map((x, i) =>
       x === null
         ? '<hr>'
-        : `<div class="mi ${x[2] || ''}" data-i="${i}">${x[3] ? `<span class="pdot" style="--c:${esc(x[3])}"></span>` : ''}${esc(x[0])}</div>`,
+        : x[2] === 'label'
+          ? `<div class="mi-label">${esc(x[0])}</div>`
+          : `<div class="mi ${x[2] || ''}" data-i="${i}">${x[3] ? `<span class="pdot" style="--c:${esc(x[3])}"></span>` : ''}${esc(x[0])}</div>`,
     )
     .join('');
   m.hidden = false;
@@ -1836,7 +1882,11 @@ document.querySelectorAll('.resizer').forEach((rz) =>
 
 // ------------------------------------------------------------------ global keys & boot
 
-window.addEventListener('focus', () => S.repo && scheduleRefresh());
+window.addEventListener('focus', () => {
+  if (!S.repo) return;
+  scheduleRefresh();
+  autoFetch(60_000); // back in the app: fetch if the last one is over a minute old
+});
 
 listen('repo-changed', (ev) => {
   if (ev.payload === S.repo) scheduleRefresh();

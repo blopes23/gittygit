@@ -27,11 +27,30 @@ pub struct Profile {
     pub terminal_repos: Vec<String>,
 }
 
+/// App-wide preferences (Settings window).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct Settings {
+    /// Background fetch interval for the active repository; 0 turns it off.
+    pub auto_fetch_minutes: u32,
+    /// Default pull strategy: "ask" (when branches diverge), "merge", "rebase" or "ff-only".
+    pub pull_mode: String,
+    /// Per-repository pull strategy chosen in the Pull menu or the divergence prompt.
+    pub repo_pull: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { auto_fetch_minutes: 5, pull_mode: "ask".into(), repo_pull: Default::default() }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 #[serde(default)]
 pub struct Store {
     pub active: String,
     pub profiles: Vec<Profile>,
+    pub settings: Settings,
     /// True when no profiles file existed yet (first launch).
     #[serde(skip_deserializing)]
     pub fresh: bool,
@@ -75,6 +94,7 @@ fn default_store() -> Store {
             color: "#a46ff0".into(),
             ..Default::default()
         }],
+        settings: Settings::default(),
         fresh: false,
     }
 }
@@ -120,6 +140,11 @@ pub fn validate(store: &Store) -> R<()> {
                 return Err(format!("{repo} is in both {} and {}", q.name, p.name));
             }
         }
+    }
+    const MODES: [&str; 4] = ["ask", "merge", "rebase", "ff-only"];
+    let s = &store.settings;
+    if !MODES.contains(&s.pull_mode.as_str()) || s.repo_pull.values().any(|m| !MODES.contains(&m.as_str())) {
+        return Err("unknown pull mode".into());
     }
     store.get(&store.active).map(|_| ())
 }
@@ -399,5 +424,15 @@ mod tests {
         assert!(validate(&s).unwrap_err().contains("both"));
         assert!(s.for_repo("work", "/x").is_err());
         assert!(s.for_repo("work", "/r").is_ok());
+    }
+
+    #[test]
+    fn settings_default_and_validate() {
+        let mut store: Store = serde_json::from_str(r#"{"active":"a","profiles":[{"id":"a","name":"A"}]}"#).unwrap();
+        assert_eq!(store.settings.auto_fetch_minutes, 5, "older files get the defaults");
+        assert_eq!(store.settings.pull_mode, "ask");
+        assert!(validate(&store).is_ok());
+        store.settings.repo_pull.insert("/r".into(), "squash".into());
+        assert!(validate(&store).is_err());
     }
 }

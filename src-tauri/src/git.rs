@@ -684,6 +684,40 @@ pub fn fast_forward(repo: &str, branches: &[FfBranch], ctx: &Ctx) -> R<Vec<FfRes
     Ok(results)
 }
 
+// ---------------------------------------------------------------- remotes: tags, HTTPS auth
+
+/// Tag names present on `remote` (`git ls-remote --tags --refs`; one network round trip).
+pub fn remote_tags(repo: &str, remote: &str, ctx: &Ctx) -> R<Vec<String>> {
+    let out = exec(repo, &["ls-remote", "--tags", "--refs", remote], &[0], ctx)?;
+    Ok(out.lines().filter_map(|l| l.split_once("\trefs/tags/").map(|(_, t)| t.to_string())).collect())
+}
+
+/// "https://host/owner/repo(.git)" (optionally with "user@") -> "git@host:owner/repo.git".
+pub fn https_to_ssh(url: &str) -> Option<String> {
+    let rest = url.trim().strip_prefix("https://")?;
+    let rest = rest.split_once('@').map_or(rest, |(_, r)| r);
+    let (host, path) = rest.split_once('/')?;
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    if host.is_empty() || path.split('/').filter(|p| !p.is_empty()).count() < 2 || host.contains(':') {
+        return None;
+    }
+    Some(format!("git@{host}:{path}.git"))
+}
+
+/// Hand an HTTPS token to git's own credential store (`git credential approve`, normally the
+/// macOS Keychain helper). The token goes over stdin only; the app never keeps it.
+pub fn store_credential(repo: &str, host: &str, username: &str, token: &str) -> R<()> {
+    if [host, username, token].iter().any(|v| v.is_empty() || v.contains('\n') || v.contains('\0')) {
+        return Err("host, username and token are required".into());
+    }
+    let helper = run_codes(repo, &["config", "--get-all", "credential.helper"], &[0, 1])?;
+    if helper.trim().is_empty() {
+        return Err("git has no credential helper configured, so it can't remember a token. Switch the remote to SSH instead.".into());
+    }
+    let input = format!("protocol=https\nhost={host}\nusername={username}\npassword={token}\n\n");
+    exec_with(repo, &["credential", "approve"], &[0], &Ctx::default(), &[], Some(input.as_bytes())).map(|_| ())
+}
+
 // ---------------------------------------------------------------- partial staging
 
 /// Apply a patch built from selected hunks/lines: "stage" to the index, "unstage" (reverse,
@@ -1164,5 +1198,42 @@ mod tests {
         run(&r, &["commit-graph", "write", "--reachable"]).unwrap();
         assert!(has_commit_graph(&r));
         std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn converts_https_remotes_to_ssh() {
+        assert_eq!(https_to_ssh("https://github.com/acme/app.git").as_deref(), Some("git@github.com:acme/app.git"));
+        assert_eq!(https_to_ssh("https://bob@gitlab.com/group/sub/app").as_deref(), Some("git@gitlab.com:group/sub/app.git"));
+        assert_eq!(https_to_ssh("https://github.com/acme/"), None);
+        assert_eq!(https_to_ssh("git@github.com:acme/app.git"), None);
+        assert_eq!(https_to_ssh("https://host:8443/a/b"), None, "custom ports need a manual URL");
+    }
+
+    #[test]
+    fn stores_https_token_with_git_credential_helper() {
+        let r = repo();
+        let file = Path::new(&r).join("creds");
+        // Reset inherited helpers (the user's Keychain) and use a throwaway file store.
+        run(&r, &["config", "credential.helper", ""]).unwrap();
+        run(&r, &["config", "--add", "credential.helper", &format!("store --file {}", file.display())]).unwrap();
+        store_credential(&r, "git.example.com", "bob", "tok-123").unwrap();
+        let out = exec_with(&r, &["credential", "fill"], &[0], &Ctx::default(), &[], Some(b"protocol=https\nhost=git.example.com\nusername=bob\n\n")).unwrap();
+        assert!(out.contains("password=tok-123"), "{out}");
+        assert!(store_credential(&r, "git.example.com", "bob", "a\nb").is_err());
+        std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn lists_remote_tags() {
+        let up = repo();
+        commit(&up, "f", "1\n", "A");
+        run(&up, &["tag", "v1"]).unwrap();
+        run(&up, &["tag", "-a", "v2", "-m", "annotated"]).unwrap();
+        let local = repo();
+        let mut tags = remote_tags(&local, &up, &Ctx::default()).unwrap();
+        tags.sort();
+        assert_eq!(tags, ["v1", "v2"]);
+        std::fs::remove_dir_all(&up).unwrap();
+        std::fs::remove_dir_all(&local).unwrap();
     }
 }

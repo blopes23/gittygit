@@ -580,3 +580,30 @@ button:disabled { opacity: .45; }
 @container center (max-width: 520px) {
   #graph-header, .row { grid-template-columns: 96px var(--graph-w, 80px) 1fr 52px; }
 }
+
+/* ------------------------------------------------------------ remotes & settings */
+.act-more { margin-left: 2px; padding: 0 2px; border-radius: 3px; font-size: 9px; color: var(--text-dim); }
+.act-more:hover { background: var(--bg-3); color: var(--text); }
+.act.warn::after {
+  content: ""; position: absolute; top: 3px; left: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--orange);
+}
+.sb-item .badge {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .04em; color: var(--orange);
+  border: 1px solid color-mix(in srgb, var(--orange) 50%, transparent); border-radius: 3px; padding: 0 3px; line-height: 13px;
+}
+#ctx-menu .mi-label { padding: 5px 10px 2px; font-size: 11px; color: var(--text-faint); }
+#settings-dlg, #token-dlg {
+  width: min(460px, 92vw); padding: 0; background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+}
+#settings-dlg::backdrop, #token-dlg::backdrop { background: rgba(0, 0, 0, .45); }
+.st { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
+.st h3 { margin: 0 0 4px; font-size: 15px; }
+.st .fld { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+.st select, .st input {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; outline: none; font-size: 13px;
+}
+.st select:focus, .st input:focus { border-color: var(--accent); }
+.st .hint { color: var(--text-faint); font-size: 11px; margin: 0; }
+.st .hint a { color: var(--accent); }
+.st menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 12px 0 0; }

@@ -25,6 +25,12 @@ A fast, native-feeling Git client for macOS (Apple silicon and Intel), built wit
 - Force push with lease (offered when a push is rejected after an amend/rebase; refuses to overwrite commits you haven't integrated)
 - Undo (toast button or ⌘Z) for branch/tag/stash/remote-branch deletes, resets, discards, amends and rebases
 - Toolbar: pull, push (sets upstream on first push), fetch, branch, stash, pop, open in Terminal/Finder
+- Pull with merge, rebase or fast-forward only (Pull ▾); when branches diverge and nothing is set, it asks once per repository
+- Background fetch of the open repository (every 5 min by default; Settings, ⌘,), with a warning dot instead of popups when it fails
+- Push or delete tags on the remote; tags that aren't pushed yet are marked "local"
+- Rename branches (optionally on the remote too), track or stop tracking a remote branch
+- HTTPS sign-in failures offer to switch the remote to SSH or store an access token in git's credential store
+- Gittygit → Copy Diagnostics for bug reports; errors are logged to `~/Library/Logs/Gittygit/` with paths and tokens masked
 - Context menus: checkout, merge, rebase, cherry-pick, revert, reset soft/mixed/hard, tag, delete branch
 - Live refresh via FSEvents (`notify`) when files or refs change; changes git ignores (build output, `node_modules`) don't trigger it, and the commit graph is only reloaded when refs or HEAD move
 - Find commits by message, author or SHA (⌘F); ↵ with no match searches the whole history; ⌘O open; ⌘R refresh; ⌘↵ commit
