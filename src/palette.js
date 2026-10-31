@@ -26,6 +26,8 @@ function paletteCommands() {
       save('gg.diffSplit', diffPrefs.split);
       if (S.file && S.diffModel) showDiff(S.file, true);
     });
+    if (extras().submodules.length) add('sub-update', 'Update all submodules', 'submodules', () => updateSubmodules([]));
+    if (S.op?.bisect) add('bisect-stop', 'Stop bisect', 'bisect', () => git(['bisect', 'reset'], 'Bisect stopped — back where you started'));
     add('terminal', 'Open in Terminal', '', () => ACTIONS.terminal());
     add('finder', 'Reveal in Finder', '', () => ACTIONS.finder());
     if (repoPRs()) {

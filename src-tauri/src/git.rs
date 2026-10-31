@@ -414,6 +414,10 @@ pub struct CommitDetail {
     pub commit_time: i64,
     pub message: String,
     pub files: Vec<FileChange>,
+    /// Signature check (`%G?`): "G" good, "U" good but untrusted key, "B" bad, "X"/"Y" expired,
+    /// "R" revoked key, "E" can't be checked; None when the commit isn't signed.
+    pub signature: Option<String>,
+    pub signer: String,
 }
 
 pub fn commit(repo: &str, sha: &str) -> R<CommitDetail> {
@@ -433,7 +437,11 @@ pub fn commit(repo: &str, sha: &str) -> R<CommitDetail> {
         args.push(sha);
     }
     let files = parse_name_status(&run(repo, &args)?);
+    let sig = run(repo, &["show", "-s", "--format=%G?%x1f%GS", sha]).unwrap_or_default();
+    let (status, signer) = sig.trim_end().split_once(US).unwrap_or(("N", ""));
     Ok(CommitDetail {
+        signature: (status != "N" && !status.is_empty()).then(|| status.to_string()),
+        signer: signer.to_string(),
         sha: f[0].into(),
         parents,
         author: f[2].into(),
@@ -529,6 +537,98 @@ pub fn compare(repo: &str, a: &str, b: Option<&str>) -> R<Compare> {
         only_b: log_range(repo, &format!("{a}..{b_rev}"), 300)?,
         files: parse_name_status(&run(repo, &args)?),
     })
+}
+
+// ---------------------------------------------------------------- submodules, LFS, worktrees
+
+#[derive(Serialize, Debug)]
+pub struct Submodule {
+    pub path: String,
+    pub sha: String,
+    /// "ok", "changed" (checked-out commit differs from the recorded one), "uninitialized", "conflict".
+    pub state: String,
+    pub url: String,
+}
+
+pub fn submodules(repo: &str) -> R<Vec<Submodule>> {
+    if !Path::new(repo).join(".gitmodules").is_file() {
+        return Ok(vec![]);
+    }
+    let urls = run_codes(repo, &["config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.url$"], &[0, 1]).unwrap_or_default();
+    let paths = run_codes(repo, &["config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"], &[0, 1]).unwrap_or_default();
+    let url_for = |path: &str| {
+        let name = paths.lines().find_map(|l| l.split_once(' ').filter(|(_, p)| *p == path).map(|(k, _)| k.trim_end_matches(".path").to_string()))?;
+        urls.lines().find_map(|l| l.split_once(' ').filter(|(k, _)| k.trim_end_matches(".url") == name).map(|(_, u)| u.to_string()))
+    };
+    let out = run(repo, &["submodule", "status"])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let state = match l.chars().next()? {
+                '-' => "uninitialized",
+                '+' => "changed",
+                'U' => "conflict",
+                _ => "ok",
+            };
+            let mut it = l[1..].split_whitespace();
+            let sha = it.next()?.to_string();
+            let path = it.next()?.to_string();
+            Some(Submodule { url: url_for(&path).unwrap_or_default(), path, sha, state: state.into() })
+        })
+        .collect())
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Lfs {
+    /// .gitattributes routes files through the LFS filter.
+    pub used: bool,
+    /// git-lfs is installed (`git lfs version` works).
+    pub installed: bool,
+}
+
+pub fn lfs(repo: &str) -> Lfs {
+    let used = std::fs::read_to_string(Path::new(repo).join(".gitattributes")).map(|t| t.contains("filter=lfs")).unwrap_or(false);
+    Lfs { used, installed: used && run(repo, &["lfs", "version"]).is_ok() }
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct Worktree {
+    pub path: String,
+    pub head: String,
+    /// Branch checked out there (short name), empty when detached.
+    pub branch: String,
+    pub bare: bool,
+    pub locked: bool,
+    /// The folder is gone; `git worktree prune` cleans it up.
+    pub prunable: bool,
+    /// The worktree this repository tab is.
+    pub current: bool,
+}
+
+pub fn worktrees(repo: &str) -> R<Vec<Worktree>> {
+    let here = run(repo, &["rev-parse", "--show-toplevel"]).map(|s| s.trim().to_string()).unwrap_or_default();
+    let out = run(repo, &["worktree", "list", "--porcelain"])?;
+    let mut list = vec![];
+    for block in out.split("\n\n").filter(|b| !b.trim().is_empty()) {
+        let mut w = Worktree::default();
+        for line in block.lines() {
+            let (k, v) = line.split_once(' ').unwrap_or((line, ""));
+            match k {
+                "worktree" => w.path = v.into(),
+                "HEAD" => w.head = v.into(),
+                "branch" => w.branch = v.trim_start_matches("refs/heads/").into(),
+                "bare" => w.bare = true,
+                "locked" => w.locked = true,
+                "prunable" => w.prunable = true,
+                _ => {}
+            }
+        }
+        // Compare resolved paths: /tmp vs /private/tmp and the like.
+        let canon = |p: &str| std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string());
+        w.current = canon(&w.path) == canon(&here);
+        list.push(w);
+    }
+    Ok(list)
 }
 
 // ---------------------------------------------------------------- recovery
@@ -630,7 +730,7 @@ pub fn diff(repo: &str, path: &str, mode: &str, sha: Option<&str>, sha2: Option<
                 Some(b) => Some(commit_rev(repo, b)?),
                 None => None,
             };
-            let mut args = vec!["diff", "--no-color", "-M", a.as_str()];
+            let mut args = vec!["diff", "--no-color", "--submodule=log", "-M", a.as_str()];
             if let Some(b) = &b {
                 args.push(b);
             }
@@ -638,13 +738,13 @@ pub fn diff(repo: &str, path: &str, mode: &str, sha: Option<&str>, sha2: Option<
             run(repo, &args)
         }
         "unstaged" if untracked => run_codes(repo, &["diff", "--no-color", "--no-index", "--", "/dev/null", path], &[0, 1]),
-        "unstaged" => run(repo, &["diff", "--no-color", "--", path]),
-        "staged" => run(repo, &["diff", "--no-color", "--cached", "--", path]),
+        "unstaged" => run(repo, &["diff", "--no-color", "--submodule=log", "--", path]),
+        "staged" => run(repo, &["diff", "--no-color", "--submodule=log", "--cached", "--", path]),
         "commit" => {
             let sha = sha.ok_or("missing sha")?;
             let first_parent = run(repo, &["rev-parse", "-q", "--verify", &format!("{sha}^1")]).ok();
             match first_parent {
-                Some(p) => run(repo, &["diff", "--no-color", "-M", p.trim(), sha, "--", path]),
+                Some(p) => run(repo, &["diff", "--no-color", "--submodule=log", "-M", p.trim(), sha, "--", path]),
                 None => run(repo, &["show", "--no-color", "--format=", sha, "--", path]),
             }
         }
@@ -668,6 +768,42 @@ pub struct RepoState {
     pub step: Option<(u32, u32)>,
     /// Prepared commit message (merge).
     pub message: Option<String>,
+    /// A bisect in progress (independent of the operations above).
+    pub bisect: Option<Bisect>,
+}
+
+#[derive(Serialize, Default, Debug)]
+pub struct Bisect {
+    pub bad: Option<String>,
+    pub good: Vec<String>,
+    /// Commits still to test and roughly how many steps that takes (once good and bad are known).
+    pub remaining: Option<u32>,
+    pub steps: Option<u32>,
+    /// The first bad commit, once bisect has narrowed it down.
+    pub found: Option<String>,
+}
+
+fn bisect_state(repo: &str, git_dir: &Path) -> Option<Bisect> {
+    if !git_dir.join("BISECT_START").is_file() {
+        return None;
+    }
+    let mut b = Bisect {
+        bad: run(repo, &["rev-parse", "-q", "--verify", "refs/bisect/bad"]).ok().map(|s| s.trim().to_string()),
+        good: run(repo, &["for-each-ref", "--format=%(objectname)", "refs/bisect/good-*"]).unwrap_or_default().lines().map(String::from).collect(),
+        ..Default::default()
+    };
+    if let (Some(bad), false) = (&b.bad, b.good.is_empty()) {
+        let mut args = vec!["rev-list", "--bisect-vars", bad.as_str(), "--not"];
+        args.extend(b.good.iter().map(String::as_str));
+        let vars = run(repo, &args).unwrap_or_default();
+        let var = |k: &str| vars.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(|v| v.trim_matches('\'').to_string());
+        b.remaining = var("bisect_nr").and_then(|v| v.parse().ok());
+        b.steps = var("bisect_steps").and_then(|v| v.parse().ok());
+        if var("bisect_all").as_deref() == Some("1") {
+            b.found = Some(bad.clone());
+        }
+    }
+    Some(b)
 }
 
 fn ref_label(repo: &str, sha: &str) -> String {
@@ -682,6 +818,10 @@ fn ref_label(repo: &str, sha: &str) -> String {
 pub fn repo_state(repo: &str) -> RepoState {
     let Ok(git_dir) = run(repo, &["rev-parse", "--absolute-git-dir"]) else { return RepoState::default() };
     let g = Path::new(git_dir.trim()).to_path_buf();
+    RepoState { bisect: bisect_state(repo, &g), ..operation_state(repo, &g) }
+}
+
+fn operation_state(repo: &str, g: &Path) -> RepoState {
     let read = |p: &str| std::fs::read_to_string(g.join(p)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let commit_line = |sha: &str| run(repo, &["log", "-1", "--format=%h %s", sha]).ok().map(|s| s.trim().to_string());
 
@@ -696,6 +836,7 @@ pub fn repo_state(repo: &str) -> RepoState {
             head_name: read(&format!("{d}/head-name")).map(|h| h.trim_start_matches("refs/heads/").to_string()),
             step,
             message: None,
+            bisect: None,
         };
     }
     if let Some(sha) = read("MERGE_HEAD") {
@@ -1455,5 +1596,83 @@ mod tests {
         assert!(unreachable(&r, 50).unwrap().iter().any(|e| e.sha == stash));
         assert_eq!(default_branch(&r, "origin"), "main");
         std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn submodules_worktrees_lfs_signing_bisect() {
+        let lib = repo();
+        commit(&lib, "lib.txt", "v1\n", "lib v1");
+        let r = repo();
+        commit(&r, "f", "1\n", "A");
+        run(&r, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &lib, "vendor/lib"]).unwrap();
+        run(&r, &["commit", "-qm", "add submodule"]).unwrap();
+        let subs = submodules(&r).unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!((subs[0].path.as_str(), subs[0].state.as_str()), ("vendor/lib", "ok"));
+        assert_eq!(subs[0].url, lib);
+        // Move the submodule: the diff shows commit summaries, not a raw hash line.
+        commit(&lib, "lib.txt", "v2\n", "lib v2");
+        run(&format!("{r}/vendor/lib"), &["-c", "protocol.file.allow=always", "pull", "-q"]).unwrap();
+        assert_eq!(submodules(&r).unwrap()[0].state, "changed");
+        assert!(diff(&r, "vendor/lib", "unstaged", None, None, false).unwrap().contains("> lib v2"));
+
+        assert_eq!(lfs(&r), Lfs { used: false, installed: false });
+        std::fs::write(Path::new(&r).join(".gitattributes"), "*.psd filter=lfs diff=lfs merge=lfs -text\n").unwrap();
+        assert!(lfs(&r).used);
+
+        let wt = format!("{r}-wt");
+        run(&r, &["worktree", "add", "-q", "-b", "side", &wt]).unwrap();
+        let wts = worktrees(&r).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].current && !wts[1].current);
+        assert_eq!(wts[1].branch, "side");
+        run(&r, &["worktree", "remove", &wt]).unwrap();
+
+        // SSH-signed commit verifies as good with an allowed-signers file.
+        let key = format!("{r}/.signing-key");
+        let kg = std::process::Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-C", "t@example.com", "-f", &key]).status().unwrap();
+        assert!(kg.success());
+        let pubkey = std::fs::read_to_string(format!("{key}.pub")).unwrap();
+        std::fs::write(format!("{r}/.allowed"), format!("t@example.com {pubkey}")).unwrap();
+        let signing = [
+            ("gpg.format", "ssh".to_string()),
+            ("gpg.ssh.program", "ssh-keygen".to_string()),
+            ("user.signingkey", format!("{key}.pub")),
+            ("gpg.ssh.allowedSignersFile", format!("{r}/.allowed")),
+        ];
+        for (k, v) in signing {
+            run(&r, &["config", k, &v]).unwrap();
+        }
+        run(&r, &["commit", "-q", "-S", "--allow-empty", "-m", "signed"]).unwrap();
+        let head = run(&r, &["rev-parse", "HEAD"]).unwrap();
+        let c = super::commit(&r, head.trim()).unwrap();
+        assert_eq!(c.signature.as_deref(), Some("G"));
+        assert!(super::commit(&r, &format!("{}^", head.trim())).unwrap().signature.is_none());
+
+        // Bisect: 6 commits, the 4th introduces "bug".
+        let b = repo();
+        let mut shas = vec![];
+        for i in 0..6 {
+            shas.push(commit(&b, "f", &format!("{} {i}\n", if i >= 3 { "bug" } else { "ok" }), &format!("c{i}")));
+        }
+        run(&b, &["bisect", "start"]).unwrap();
+        run(&b, &["bisect", "bad", &shas[5]]).unwrap();
+        run(&b, &["bisect", "good", &shas[0]]).unwrap();
+        let st = repo_state(&b).bisect.unwrap();
+        assert!(st.remaining.is_some() && st.found.is_none());
+        for _ in 0..5 {
+            let st = repo_state(&b).bisect.unwrap();
+            if st.found.is_some() {
+                break;
+            }
+            let bug = std::fs::read_to_string(Path::new(&b).join("f")).unwrap().starts_with("bug");
+            run(&b, &["bisect", if bug { "bad" } else { "good" }]).unwrap();
+        }
+        assert_eq!(repo_state(&b).bisect.unwrap().found.as_deref(), Some(shas[3].as_str()));
+        run(&b, &["bisect", "reset"]).unwrap();
+        assert!(repo_state(&b).bisect.is_none());
+        for d in [&lib, &r, &b] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
     }
 }

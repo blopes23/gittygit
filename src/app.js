@@ -65,6 +65,7 @@ const S = {
   fetching: null, // promise of a running background fetch
   remoteTags: new Map(), // repo -> Set of tag names on its default remote (null while loading)
   prs: new Map(), // repo -> { slug, prs, authed } | { error } | null while loading (see github.js)
+  extras: new Map(), // repo -> { submodules, lfs, worktrees } (see advanced.js)
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -158,6 +159,8 @@ function explainGitError(msg) {
       : `Profile “${p.name}” has no SSH key — ssh tried its defaults. Pick a key in Profiles.`;
     return `${msg}\n\n${hint}`;
   }
+  if (/gpg failed to sign|failed to write commit object|Couldn't (load|sign)|incorrect passphrase supplied|No private key found/.test(msg))
+    return `${msg}\n\nCommit signing failed. Your git config signs commits (commit.gpgsign / gpg.format). With SSH signing, make sure user.signingkey and gpg.ssh.program (ssh-keygen) are set and the key is in ssh-agent (ssh-add --apple-use-keychain). With GPG, install pinentry-mac so the passphrase window can appear.`;
   if (/stale info|remote ref updated since checkout/.test(msg))
     return `${msg}\n\nSomeone else pushed to this branch and their commits aren't in yours, so the force push was refused to avoid overwriting their work. Pull (or rebase onto the remote branch) first, then push again.`;
   if (/Host key verification failed/.test(msg)) return `${msg}\n\nThe server's host key changed or is untrusted; check ~/.ssh/known_hosts.`;
@@ -390,6 +393,8 @@ async function refresh() {
     if (snap.graph) suggestCommitGraph();
     if (!S.remoteTags.has(repo) && refs.remote_names.length) updateRemoteTags(repo);
     if (!S.prs.has(repo) && refs.remote_names.length) updatePRs(repo);
+    if (snap.graph || !S.extras.has(repo)) updateExtras(repo);
+    renderBisectBar();
   } catch (e) {
     toast(String(e), 'err');
   } finally {
@@ -597,6 +602,7 @@ function renderSidebar() {
     section('local', 'Local', r.branches.length, local || empty('No branches')) +
     section('remote', 'Remote', r.remotes.length, remotes || empty('No remotes')) +
     prSection(section, empty) +
+    extrasSections(section, empty) +
     section('tags', 'Tags', r.tags.length, tags || empty('No tags')) +
     section('stashes', 'Stashes', r.stashes.length, stashes || empty('No stashes'));
 
@@ -636,7 +642,7 @@ $('#sidebar').addEventListener('click', (e) => {
     const [a, b] = [order.indexOf(S.sbAnchor), order.indexOf(name)].sort((x, y) => x - y);
     if (a >= 0) return setBranchSelection(order.slice(a, b + 1));
   }
-  if (kind === 'pr') {
+  if (kind === 'pr' || kind === 'submodule' || kind === 'worktree') {
     if (S.index.has(it.dataset.sha)) jumpTo(it.dataset.sha);
     return;
   }
@@ -662,6 +668,8 @@ $('#sidebar').addEventListener('dblclick', (e) => {
   if (it.dataset.kind === 'remote') checkoutRemote(it.dataset.name);
   if (it.dataset.kind === 'stash') git(['stash', 'apply', `stash@{${it.dataset.index}}`], 'Stash applied');
   if (it.dataset.kind === 'pr') checkoutPR(+it.dataset.name);
+  if (it.dataset.kind === 'submodule') openSubmodule(it.dataset.name);
+  if (it.dataset.kind === 'worktree') openWorktree(it.dataset.name);
 });
 $('#sidebar').addEventListener('contextmenu', (e) => {
   const it = e.target.closest('.sb-item');
@@ -735,6 +743,8 @@ function checkoutRemote(remoteName) {
 
 function refMenu(kind, name, sha) {
   if (kind === 'pr') return prMenu(+name);
+  if (kind === 'submodule') return submoduleMenu(name);
+  if (kind === 'worktree') return worktreeMenu(name);
   const cur = currentBranch()?.name;
   if (kind === 'tag') {
     const remote = defaultRemote();
@@ -778,6 +788,7 @@ function refMenu(kind, name, sha) {
     null,
     ['Create branch here…', () => newBranchAt(sha)],
     br && prMenuItem(br),
+    br && !isCur && !worktreeFor(name) && [`New worktree for ${name}…`, () => addWorktree(name)],
     br && [`Rename ${name}…`, () => renameBranch(br)],
     br && [br.upstream ? `Change tracked branch (${br.upstream})…` : 'Track remote branch…', () => trackBranch(br)],
     br?.upstream && [`Stop tracking ${br.upstream}`, () => git(['branch', '--unset-upstream', name], `${name} no longer tracks ${br.upstream}`)],
@@ -1154,6 +1165,7 @@ $('#graph-rows').addEventListener('contextmenu', (e) => {
     ['Create branch here…', () => newBranchAt(r.sha)],
     ['Create tag here…', () => newTag(r.sha)],
     ['Compare with working tree', () => setCompare({ a: r.sha, b: null, labelA: short(r.sha), labelB: 'working tree' })],
+    ...bisectMenu(r.sha),
     ['Checkout this commit (detached)', () => confirmRun(`Check out ${short(r.sha)} in detached HEAD state?`, ['checkout', '--detach', r.sha], `HEAD at ${short(r.sha)}`)],
     null,
     ['Cherry-pick commit', () => git(['cherry-pick', ...merge, r.sha], `Cherry-picked ${short(r.sha)}`)],
@@ -1555,6 +1567,7 @@ async function renderCommit(sha) {
       <h2>${esc(summary)}</h2>
       ${body ? `<div class="body">${esc(body)}</div>` : ''}
       <div class="d-meta">${avatar(c.author, c.email)}<div class="who"><b>${esc(c.author)}</b><small title="${fmtFull(c.time)}">authored ${fmtDate(c.time)} · ${esc(c.email)}</small>${committed}</div></div>
+      ${signatureHtml(c)}
     </div>
     <div class="d-scroll">
       <div class="f-section-h">${c.files.length} changed file${c.files.length === 1 ? '' : 's'}${c.parents.length > 1 ? ' <small>(vs first parent)</small>' : ''}</div>
@@ -1822,6 +1835,12 @@ async function showDiff(file, silent = false) {
     // Keep picked lines only while the diff they refer to is unchanged.
     if (text !== S.diffText) S.lineSel.clear();
     S.diffText = text;
+    const special = specialDiffHtml(text);
+    if (special) {
+      S.diffText = text;
+      S.diffModel = null;
+      return showPane(file, file.path, '', special, silent);
+    }
     S.diffModel = parseDiff(text);
     S.diffModel.lang = langFor(file.path);
     S.lineAnchor = null;

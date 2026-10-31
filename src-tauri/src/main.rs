@@ -288,7 +288,7 @@ fn add_to_gitignore(profile_id: String, repo: String, pattern: String) -> R<bool
 fn git_run(profile_id: String, repo: String, args: Vec<String>) -> R<String> {
     const ALLOWED: &[&str] = &[
         "add", "apply", "branch", "checkout", "cherry-pick", "clean", "commit", "fetch", "merge", "pull", "push",
-        "rebase", "reset", "restore", "rev-parse", "revert", "rm", "stash", "switch", "tag",
+        "bisect", "rebase", "reset", "restore", "rev-parse", "revert", "rm", "stash", "submodule", "switch", "tag", "worktree",
     ];
     let sub = args.first().map(String::as_str).unwrap_or_default();
     if !ALLOWED.contains(&sub) {
@@ -436,6 +436,23 @@ fn log_error(message: String) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         use std::io::Write;
         let _ = writeln!(f, "[{stamp}] {}", message.replace('\n', "\n  "));
+    }
+}
+
+/// Submodules, Git LFS status and worktrees of a repository (for the sidebar and banners).
+#[derive(Serialize)]
+struct Extras {
+    submodules: Vec<git::Submodule>,
+    lfs: git::Lfs,
+    worktrees: Vec<git::Worktree>,
+}
+
+#[tauri::command(async)]
+fn repo_extras(repo: String) -> Extras {
+    Extras {
+        submodules: git::submodules(&repo).unwrap_or_default(),
+        lfs: git::lfs(&repo),
+        worktrees: git::worktrees(&repo).unwrap_or_default(),
     }
 }
 
@@ -589,6 +606,7 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "diagnostics" => json!({ "app": env!("CARGO_PKG_VERSION"), "arch": std::env::consts::ARCH, "git_version": git::run(".", &["--version"]).unwrap_or_default().trim() }),
         "log_error" => json!(log_error(s("message"))),
         "get_reflog" => to_value(get_reflog(repo)?).unwrap(),
+        "repo_extras" => to_value(repo_extras(repo)).unwrap(),
         "get_unreachable" => to_value(get_unreachable(repo)?).unwrap(),
         "default_branch" => json!(default_branch(repo, s("remote"))),
         "pull_requests" => to_value(pull_requests(s("profile_id"), repo, s("remote"))?).unwrap(),
@@ -694,6 +712,7 @@ fn main() {
             diagnostics,
             log_error,
             get_reflog,
+            repo_extras,
             get_unreachable,
             default_branch,
             pull_requests,
