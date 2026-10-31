@@ -597,13 +597,13 @@ button:disabled { opacity: .45; }
   border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
 }
 #settings-dlg::backdrop, #token-dlg::backdrop { background: rgba(0, 0, 0, .45); }
-.st { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
-.st h3 { margin: 0 0 4px; font-size: 15px; }
-.st .fld { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); margin-top: 6px; }
-.st select, .st input {
+.st-form { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
+.st-form h3 { margin: 0 0 4px; font-size: 15px; }
+.st-form .fld { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+.st-form select, .st-form input {
   background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; outline: none; font-size: 13px;
 }
-.st select:focus, .st input:focus { border-color: var(--accent); }
-.st .hint { color: var(--text-faint); font-size: 11px; margin: 0; }
-.st .hint a { color: var(--accent); }
-.st menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 12px 0 0; }
+.st-form select:focus, .st-form input:focus { border-color: var(--accent); }
+.st-form .hint { color: var(--text-faint); font-size: 11px; margin: 0; }
+.st-form .hint a { color: var(--accent); }
+.st-form menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 12px 0 0; }
