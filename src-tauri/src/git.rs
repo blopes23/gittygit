@@ -432,20 +432,7 @@ pub fn commit(repo: &str, sha: &str) -> R<CommitDetail> {
         args.push("--root");
         args.push(sha);
     }
-    let names = run(repo, &args)?;
-    let mut files = vec![];
-    let mut it = names.split('\0').filter(|s| !s.is_empty());
-    while let Some(st) = it.next() {
-        let code = &st[0..1];
-        if code == "R" || code == "C" {
-            let orig = it.next().map(String::from);
-            if let Some(p) = it.next() {
-                files.push(FileChange { path: p.into(), status: code.into(), orig, conflict: None });
-            }
-        } else if let Some(p) = it.next() {
-            files.push(FileChange { path: p.into(), status: code.into(), orig: None, conflict: None });
-        }
-    }
+    let files = parse_name_status(&run(repo, &args)?);
     Ok(CommitDetail {
         sha: f[0].into(),
         parents,
@@ -459,10 +446,126 @@ pub fn commit(repo: &str, sha: &str) -> R<CommitDetail> {
     })
 }
 
+/// `--name-status -z` output (with renames/copies carrying two paths) as file changes.
+fn parse_name_status(out: &str) -> Vec<FileChange> {
+    let mut files = vec![];
+    let mut it = out.split('\0').filter(|s| !s.is_empty());
+    while let Some(st) = it.next() {
+        let code = &st[0..1];
+        if code == "R" || code == "C" {
+            let orig = it.next().map(String::from);
+            if let Some(p) = it.next() {
+                files.push(FileChange { path: p.into(), status: code.into(), orig, conflict: None });
+            }
+        } else if let Some(p) = it.next() {
+            files.push(FileChange { path: p.into(), status: code.into(), orig: None, conflict: None });
+        }
+    }
+    files
+}
+
+// ---------------------------------------------------------------- compare
+
+/// A revision from the UI (sha, branch or tag), checked to name a commit and not to be an option.
+fn commit_rev(repo: &str, rev: &str) -> R<String> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return Err(format!("bad revision {rev}"));
+    }
+    run(repo, &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")])
+        .map(|s| s.trim().to_string())
+        .map_err(|_| format!("{rev} is not a commit"))
+}
+
+#[derive(Serialize)]
+pub struct LogEntry {
+    pub sha: String,
+    pub subject: String,
+    pub author: String,
+    pub email: String,
+    pub time: i64,
+}
+
+#[derive(Serialize)]
+pub struct Compare {
+    /// Commits reachable from A but not B, and the other way round (newest first, capped).
+    pub only_a: Vec<LogEntry>,
+    pub only_b: Vec<LogEntry>,
+    pub files: Vec<FileChange>,
+}
+
+fn log_range(repo: &str, range: &str, max: usize) -> R<Vec<LogEntry>> {
+    let n = format!("-n{max}");
+    let out = run(repo, &["log", &n, "--format=%H%x1f%s%x1f%an%x1f%ae%x1f%at", range])?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(US).collect();
+            (f.len() == 5).then(|| LogEntry {
+                sha: f[0].into(),
+                subject: f[1].into(),
+                author: f[2].into(),
+                email: f[3].into(),
+                time: f[4].parse().unwrap_or(0),
+            })
+        })
+        .collect())
+}
+
+/// Compare two commits (or a commit with the working tree when `b` is None): the commits on
+/// each side and the files that differ.
+pub fn compare(repo: &str, a: &str, b: Option<&str>) -> R<Compare> {
+    let a = commit_rev(repo, a)?;
+    let b_sha = match b {
+        Some(b) => Some(commit_rev(repo, b)?),
+        None => None,
+    };
+    let b_rev = b_sha.clone().unwrap_or_else(|| "HEAD".into());
+    let mut args = vec!["diff", "--name-status", "-z", "-M", a.as_str()];
+    if let Some(b) = &b_sha {
+        args.push(b);
+    }
+    Ok(Compare {
+        only_a: log_range(repo, &format!("{b_rev}..{a}"), 300)?,
+        only_b: log_range(repo, &format!("{a}..{b_rev}"), 300)?,
+        files: parse_name_status(&run(repo, &args)?),
+    })
+}
+
+/// Append a pattern to the repository's root .gitignore (created if needed), once.
+pub fn add_to_gitignore(repo: &str, pattern: &str) -> R<bool> {
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.contains(['\n', '\r', '\0']) {
+        return Err("bad pattern".into());
+    }
+    let path = Path::new(repo).join(".gitignore");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == pattern) {
+        return Ok(false);
+    }
+    let sep = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    std::fs::write(&path, format!("{text}{sep}{pattern}\n")).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 // ---------------------------------------------------------------- diffs
 
-pub fn diff(repo: &str, path: &str, mode: &str, sha: Option<&str>, untracked: bool) -> R<String> {
+/// Diff of one file. Modes: "unstaged", "staged", "commit" (`sha` vs its first parent) and
+/// "range" (`sha` vs `sha2`, or vs the working tree when `sha2` is None).
+pub fn diff(repo: &str, path: &str, mode: &str, sha: Option<&str>, sha2: Option<&str>, untracked: bool) -> R<String> {
     match mode {
+        "range" => {
+            let a = commit_rev(repo, sha.ok_or("missing sha")?)?;
+            let b = match sha2 {
+                Some(b) => Some(commit_rev(repo, b)?),
+                None => None,
+            };
+            let mut args = vec!["diff", "--no-color", "-M", a.as_str()];
+            if let Some(b) = &b {
+                args.push(b);
+            }
+            args.extend(["--", path]);
+            run(repo, &args)
+        }
         "unstaged" if untracked => run_codes(repo, &["diff", "--no-color", "--no-index", "--", "/dev/null", path], &[0, 1]),
         "unstaged" => run(repo, &["diff", "--no-color", "--", path]),
         "staged" => run(repo, &["diff", "--no-color", "--cached", "--", path]),
@@ -1235,5 +1338,31 @@ mod tests {
         assert_eq!(tags, ["v1", "v2"]);
         std::fs::remove_dir_all(&up).unwrap();
         std::fs::remove_dir_all(&local).unwrap();
+    }
+
+    #[test]
+    fn compares_revisions_and_working_tree() {
+        let r = repo();
+        let a = commit(&r, "f", "1\n", "A");
+        run(&r, &["switch", "-q", "-c", "topic"]).unwrap();
+        commit(&r, "g", "x\n", "topic work");
+        run(&r, &["switch", "-q", "main"]).unwrap();
+        commit(&r, "f", "2\n", "main work");
+        let c = compare(&r, "topic", Some("main")).unwrap();
+        assert_eq!(c.only_a.iter().map(|e| e.subject.as_str()).collect::<Vec<_>>(), ["topic work"]);
+        assert_eq!(c.only_b.iter().map(|e| e.subject.as_str()).collect::<Vec<_>>(), ["main work"]);
+        let mut files: Vec<String> = c.files.iter().map(|f| format!("{}{}", f.status, f.path)).collect();
+        files.sort();
+        assert_eq!(files, ["Dg", "Mf"]);
+        std::fs::write(Path::new(&r).join("f"), "3\n").unwrap();
+        let w = compare(&r, &a, None).unwrap();
+        assert_eq!(w.only_b.len(), 1, "HEAD is one commit after A");
+        assert!(diff(&r, "f", "range", Some(&a), None, false).unwrap().contains("+3"));
+        assert!(compare(&r, "--output=x", None).is_err(), "options are not revisions");
+        assert!(add_to_gitignore(&r, "*.log").unwrap());
+        assert!(!add_to_gitignore(&r, "*.log").unwrap(), "already present");
+        assert!(add_to_gitignore(&r, "a\nb").is_err());
+        assert_eq!(std::fs::read_to_string(Path::new(&r).join(".gitignore")).unwrap(), "*.log\n");
+        std::fs::remove_dir_all(&r).unwrap();
     }
 }

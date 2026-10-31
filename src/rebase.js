@@ -13,7 +13,8 @@ const RB_ACTIONS = {
 const RB = { base: null, items: [], drag: null };
 const rbDlg = $('#rebase-dlg');
 
-async function openRebase(base) {
+/** `preset.squash`: consecutive commits (oldest first) to squash into the oldest of them. */
+async function openRebase(base, preset = {}) {
   if (S.op?.kind) return toast(`Finish the ${S.op.kind} in progress first.`, 'err');
   if (S.status && (S.status.staged.length || S.status.unstaged.some((f) => f.status !== '?')))
     return toast('Commit or stash your changes before an interactive rebase.', 'err');
@@ -25,8 +26,14 @@ async function openRebase(base) {
   }
   if (plan.has_merges) return toast("The commits after this one include merges, which an interactive rebase would flatten. Pick a later commit.", 'err');
   if (!plan.commits.length) return toast('There are no commits after this one on the current branch.');
+  const squash = preset.squash || [];
+  if (squash.length) {
+    const order = plan.commits.map((c) => c.sha);
+    if (squash.some((sha, k) => order[k] !== sha))
+      return toast('Squashing needs consecutive commits on the current branch. Select a run of commits without gaps.', 'err');
+  }
   RB.base = base;
-  RB.items = plan.commits.reverse().map((c) => ({ ...c, action: 'pick', edited: c.message }));
+  RB.items = plan.commits.reverse().map((c) => ({ ...c, action: squash.includes(c.sha) && c.sha !== squash[0] ? 'squash' : 'pick', edited: c.message }));
   renderRebase();
   rbDlg.showModal();
 }

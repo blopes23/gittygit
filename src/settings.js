@@ -9,6 +9,8 @@ function openSettings() {
   $('#st-fetch').value = String(st.auto_fetch_minutes);
   if (!$('#st-fetch').value) $('#st-fetch').value = '5';
   $('#st-pull').value = st.pull_mode;
+  $('#st-words').checked = diffPrefs.words;
+  $('#st-syntax').checked = diffPrefs.syntax;
   stDlg.dataset.resetPull = '';
   $('#st-reset-pull').textContent = `Clear per-repository choices (${Object.keys(st.repo_pull).length})`;
   stDlg.returnValue = '';
@@ -26,6 +28,12 @@ stDlg.addEventListener('close', async () => {
   const mins = +$('#st-fetch').value;
   const mode = $('#st-pull').value;
   const reset = stDlg.dataset.resetPull === '1';
+  // Diff display preferences are per Mac (localStorage), not part of the shared profile store.
+  diffPrefs.words = $('#st-words').checked;
+  diffPrefs.syntax = $('#st-syntax').checked;
+  save('gg.diffWords', diffPrefs.words);
+  save('gg.diffSyntax', diffPrefs.syntax);
+  if (S.file && S.diffModel) showDiff(S.file, true);
   await mutateStore((st) => {
     st.settings.auto_fetch_minutes = mins;
     st.settings.pull_mode = mode;

@@ -139,6 +139,10 @@
           <option value="rebase">Rebase</option><option value="ff-only">Fast-forward only (stop instead)</option>
         </select></label>
       <small class="hint">Repositories with their own choice (Pull ▾) keep it. <a href="#" id="st-reset-pull">Clear per-repository choices</a></small>
+      <div class="fld">Diffs
+        <label class="chk"><input type="checkbox" id="st-words"> Highlight the changed words in modified lines</label>
+        <label class="chk"><input type="checkbox" id="st-syntax"> Syntax colours</label>
+      </div>
       <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Save</button></menu>
     </form>
   </dialog>
@@ -198,10 +202,13 @@
     </div>
   </dialog>
 
+  <script src="vendor/highlight.min.js"></script>
+  <script src="diffdecor.js"></script>
   <script src="app.js"></script>
   <script src="conflicts.js"></script>
   <script src="history.js"></script>
   <script src="rebase.js"></script>
+  <script src="compare.js"></script>
   <script src="profiles.js"></script>
   <script src="remote.js"></script>
   <script src="settings.js"></script>

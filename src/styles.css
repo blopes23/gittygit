@@ -607,3 +607,41 @@ button:disabled { opacity: .45; }
 .st-form .hint { color: var(--text-faint); font-size: 11px; margin: 0; }
 .st-form .hint a { color: var(--accent); }
 .st-form menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 12px 0 0; }
+
+/* ------------------------------------------------------------ split diffs, changed words, syntax */
+.diff-lines.split { width: 100%; }
+.sr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.sc { display: grid; grid-template-columns: 44px 18px minmax(0, 1fr); min-width: 0; --row: var(--bg); background: var(--row); }
+.sr .sc + .sc { box-shadow: inset 1px 0 0 var(--border); }
+.sc.dl .n, .sc.dl .s { position: static; }
+.sc .t { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
+.sc.empty { background: repeating-linear-gradient(135deg, var(--bg), var(--bg) 4px, var(--bg-2) 4px, var(--bg-2) 8px); }
+.diff-lines.virtual.split .sc .t { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.diff-lines.virtual .sc { height: 19px; line-height: 19px; }
+.dl.del .wd { background: color-mix(in srgb, var(--red) 38%, transparent); border-radius: 2px; }
+.dl.add .wd { background: color-mix(in srgb, var(--green) 34%, transparent); border-radius: 2px; }
+.st-form .chk { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 12px; }
+
+/* syntax colours (highlight.js classes), tuned for the dark palette */
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-doctag { color: #c792ea; }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-template-tag { color: #a5d6a7; }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: #f6b26b; }
+.hljs-comment, .hljs-quote, .hljs-meta { color: #6b7385; font-style: italic; }
+.hljs-title, .hljs-section, .hljs-selector-id, .hljs-name { color: #82b1ff; }
+.hljs-type, .hljs-class .hljs-title, .hljs-title.class_ { color: #ffcb6b; }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-selector-class, .hljs-property { color: #80cbc4; }
+.hljs-tag { color: #9aa3b5; }
+.hljs-subst, .hljs-params { color: var(--text); }
+.hljs-deletion { color: #ef9a9a; }
+.hljs-emphasis { font-style: italic; } .hljs-strong { font-weight: 700; }
+
+/* ------------------------------------------------------------ multi-select & compare */
+.row.flash { background: color-mix(in srgb, var(--accent) 30%, var(--bg)); transition: background .3s; }
+.multi-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
+.cmp-title { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cmp-title code { font-family: var(--mono); font-size: 12px; background: var(--bg-3); padding: 1px 6px; border-radius: 4px; }
+.cmp-commit { display: flex; align-items: center; gap: 8px; padding: 4px 14px; font-size: 12px; cursor: pointer; }
+.cmp-commit:hover { background: var(--bg-hover); }
+.cmp-commit .avatar { width: 20px; height: 20px; font-size: 8px; }
+.cmp-commit .s { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-commit code { color: var(--text-faint); font-size: 11px; }

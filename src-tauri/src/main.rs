@@ -264,8 +264,21 @@ fn get_commit(repo: String, sha: String) -> R<git::CommitDetail> {
 }
 
 #[tauri::command(async)]
-fn get_diff(repo: String, path: String, mode: String, sha: Option<String>, untracked: Option<bool>) -> R<String> {
-    git::diff(&repo, &path, &mode, sha.as_deref(), untracked.unwrap_or(false))
+fn get_diff(repo: String, path: String, mode: String, sha: Option<String>, sha2: Option<String>, untracked: Option<bool>) -> R<String> {
+    git::diff(&repo, &path, &mode, sha.as_deref(), sha2.as_deref(), untracked.unwrap_or(false))
+}
+
+/// Commits on each side and changed files between two revisions (or one and the working tree).
+#[tauri::command(async)]
+fn compare(repo: String, a: String, b: Option<String>) -> R<git::Compare> {
+    git::compare(&repo, &a, b.as_deref())
+}
+
+/// Append a pattern to the repo's .gitignore; false when it was already there.
+#[tauri::command(async)]
+fn add_to_gitignore(profile_id: String, repo: String, pattern: String) -> R<bool> {
+    profiles::load().for_repo(&profile_id, &repo)?;
+    git::add_to_gitignore(&repo, &pattern)
 }
 
 /// Mutating git operations, run with the profile's SSH key and identity.
@@ -500,8 +513,14 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "get_commit" => to_value(get_commit(repo, s("sha"))?).unwrap(),
         "get_diff" => {
             let sha = Some(s("sha")).filter(|x| !x.is_empty());
-            json!(get_diff(repo, s("path"), s("mode"), sha, get("untracked").and_then(|v| v.as_bool()))?)
+            let sha2 = Some(s("sha2")).filter(|x| !x.is_empty());
+            json!(get_diff(repo, s("path"), s("mode"), sha, sha2, get("untracked").and_then(|v| v.as_bool()))?)
         }
+        "compare" => {
+            let b = Some(s("b")).filter(|x| !x.is_empty());
+            to_value(compare(repo, s("a"), b)?).unwrap()
+        }
+        "add_to_gitignore" => json!(add_to_gitignore(s("profile_id"), repo, s("pattern"))?),
         "apply_patch" => json!(apply_patch(s("profile_id"), repo, s("patch"), s("mode"))?),
         "file_history" => to_value(file_history(repo, s("path"))?).unwrap(),
         "blame" => to_value(blame(repo, s("path"), Some(s("rev")))?).unwrap(),
@@ -602,6 +621,8 @@ fn main() {
             get_refs,
             get_commit,
             get_diff,
+            compare,
+            add_to_gitignore,
             git_run,
             get_repo_state,
             read_conflict,

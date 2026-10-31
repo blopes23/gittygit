@@ -58,6 +58,10 @@ const S = {
   lineSel: new Set(), // picked diff lines ("hunk:line")
   lineAnchor: null,
   undo: null, // last undoable action, see offerUndo()
+  multi: new Set(), // commits selected together in the graph (⌘/⇧-click)
+  multiAnchor: null, // row index ⇧-click ranges start from
+  compare: null, // { a, b, labelA, labelB } while the detail panel shows a comparison
+  flash: null, // commit briefly highlighted in the graph
   fetching: null, // promise of a running background fetch
   remoteTags: new Map(), // repo -> Set of tag names on its default remote (null while loading)
 };
@@ -738,6 +742,7 @@ function refMenu(kind, name, sha) {
     return [
       [`Checkout ${branch}`, () => checkoutRemote(name)],
       cur && [`Merge ${name} into ${cur}`, () => git(['merge', name], `Merged ${name}`)],
+      cur && [`Compare ${name} with ${cur}`, () => setCompare({ a: cur, b: name, labelA: cur, labelB: name })],
       cur && [`Rebase ${cur} onto ${name}`, () => moveHead(['rebase', name], `Rebased ${cur} onto ${name}`)],
       null,
       ['Copy branch name', () => navigator.clipboard.writeText(name)],
@@ -752,6 +757,7 @@ function refMenu(kind, name, sha) {
     !isCur && [`Checkout ${name}`, () => checkoutLocal(name)],
     canFF && [`Pull ${br.upstream} into ${name} (fast-forward)${br.behind ? `  ↓${br.behind}` : ''}`, () => fastForward([br])],
     !isCur && cur && [`Merge ${name} into ${cur}`, () => git(['merge', name], `Merged ${name} into ${cur}`)],
+    !isCur && cur && [`Compare ${name} with ${cur}`, () => setCompare({ a: cur, b: name, labelA: cur, labelB: name })],
     !isCur && cur && [`Rebase ${cur} onto ${name}`, () => moveHead(['rebase', name], `Rebased ${cur} onto ${name}`)],
     isCur && ['Push', () => ACTIONS.push()],
     isCur && br?.upstream && ['Force push (with lease)…', () => forcePush(br), 'danger'],
@@ -994,7 +1000,8 @@ function wipSummary() {
 
 function rowHtml(r, i) {
   const wip = r.sha === 'WIP';
-  const cls = ['row', wip && 'wip', r.parents.length > 1 && 'merge', S.selected === r.sha && 'sel', S.matchSet.has(r.sha) && 'match']
+  const sel = S.compare ? S.compare.a === r.sha || S.compare.b === r.sha : S.selected === r.sha || S.multi.has(r.sha);
+  const cls = ['row', wip && 'wip', r.parents.length > 1 && 'merge', sel && 'sel', S.matchSet.has(r.sha) && 'match', S.flash === r.sha && 'flash']
     .filter(Boolean)
     .join(' ');
   const msg = wip ? `// WIP — ${wipSummary()}` : esc(r.subject);
@@ -1062,6 +1069,8 @@ new ResizeObserver(() => S.repo && renderRows()).observe($('#graph-scroll'));
 function select(sha, scroll = false) {
   if (!sha) return;
   S.selected = sha;
+  S.multi.clear();
+  S.compare = null;
   closeDiff();
   closeConflict();
   if (scroll) ensureVisible(S.index.get(sha));
@@ -1084,7 +1093,11 @@ function jumpTo(sha) {
 
 $('#graph-rows').addEventListener('click', (e) => {
   const row = e.target.closest('.row');
-  if (row) select(S.rows[+row.dataset.i].sha);
+  if (!row) return;
+  const i = +row.dataset.i;
+  if ((e.metaKey || e.shiftKey) && S.rows[i].sha !== 'WIP') return extendSelection(i, e.shiftKey);
+  select(S.rows[i].sha);
+  S.multiAnchor = i;
 });
 $('#graph-rows').addEventListener('dblclick', (e) => {
   const pill = e.target.closest('.pill[data-kind]');
@@ -1104,6 +1117,7 @@ $('#graph-rows').addEventListener('contextmenu', (e) => {
   if (!row) return;
   e.preventDefault();
   const r = S.rows[+row.dataset.i];
+  if (S.multi.size > 1 && S.multi.has(r.sha)) return showMenu(e, multiMenu());
   select(r.sha);
   const pill = e.target.closest('.pill[data-kind]');
   if (pill && pill.dataset.kind !== 'head') return showMenu(e, refMenu(pill.dataset.kind, pill.dataset.name, r.sha));
@@ -1125,6 +1139,7 @@ $('#graph-rows').addEventListener('contextmenu', (e) => {
     branchItems.length ? null : false,
     ['Create branch here…', () => newBranchAt(r.sha)],
     ['Create tag here…', () => newTag(r.sha)],
+    ['Compare with working tree', () => setCompare({ a: r.sha, b: null, labelA: short(r.sha), labelB: 'working tree' })],
     ['Checkout this commit (detached)', () => confirmRun(`Check out ${short(r.sha)} in detached HEAD state?`, ['checkout', '--detach', r.sha], `HEAD at ${short(r.sha)}`)],
     null,
     ['Cherry-pick commit', () => git(['cherry-pick', ...merge, r.sha], `Cherry-picked ${short(r.sha)}`)],
@@ -1329,6 +1344,8 @@ function renderDetail() {
     $('#detail').innerHTML = '';
     return;
   }
+  if (S.compare) return renderCompare();
+  if (S.multi.size > 1) return renderMulti();
   if (S.selected === 'WIP') renderWip();
   else renderCommit(S.selected);
 }
@@ -1485,7 +1502,8 @@ $('#detail').addEventListener('click', (e) => {
   if (row && row.dataset.mode === 'conflict') return openConflict(row.dataset.path, row.dataset.xy);
   if (row) {
     const mode = row.dataset.mode;
-    showDiff({ path: row.dataset.path, mode, sha: mode === 'commit' ? S.selected : null, untracked: row.dataset.status === '?' });
+    const sha = mode === 'commit' ? S.selected : mode === 'range' ? S.compare.a : null;
+    showDiff({ path: row.dataset.path, mode, sha, sha2: mode === 'range' ? S.compare.b : null, untracked: row.dataset.status === '?' });
   }
 });
 $('#detail').addEventListener('dblclick', (e) => {
@@ -1568,6 +1586,10 @@ const partialOk = (file, m) => (file.mode === 'unstaged' || file.mode === 'stage
 const VIRTUAL_MIN = 2000; // diff rows above which only the visible window is in the DOM
 const DL_H = 19; // fixed row height in virtual mode (matches styles.css)
 
+// Diff display preferences (per Mac): side-by-side, changed-word marks, syntax colours.
+const diffPrefs = { split: load('gg.diffSplit', false), words: load('gg.diffWords', true), syntax: load('gg.diffSyntax', true) };
+const decoKey = () => `${diffPrefs.words}${diffPrefs.syntax}`;
+
 /** Flat list of rows (hunk headers and lines, with line numbers), built once per diff. */
 function diffItems(m) {
   if (m.items) return m.items;
@@ -1584,15 +1606,72 @@ function diffItems(m) {
   return items;
 }
 
-function itemHtml(it, hunkBtns) {
-  if (it.head !== undefined) return `<div class="hunk" data-h="${it.hi}"><span>${esc(it.head)}</span>${hunkBtns}</div>`;
+/** Side-by-side rows: context on both sides, removed lines paired with the added ones. */
+function splitItems(m) {
+  if (m.sitems) return m.sitems;
+  const rows = [];
+  let dels = [], adds = [];
+  const flush = () => {
+    for (let i = 0; i < Math.max(dels.length, adds.length); i++) rows.push({ l: dels[i] || null, r: adds[i] || null });
+    dels = [];
+    adds = [];
+  };
+  for (const it of diffItems(m)) {
+    if (it.head !== undefined) {
+      flush();
+      rows.push(it);
+    } else if (it.ln.k === '-') {
+      if (adds.length) flush();
+      dels.push(it);
+    } else if (it.ln.k === '+') adds.push(it);
+    else {
+      flush();
+      rows.push({ l: it, r: it });
+    }
+  }
+  flush();
+  return (m.sitems = rows);
+}
+
+/** Line text with syntax colours and changed-word marks (cached per item and preferences). */
+function lineText(m, it) {
+  if (it.htmlKey === decoKey()) return it.html;
+  const h = m.hunks[it.hi];
+  const syn = diffPrefs.syntax && m.lang ? hunkSyntax(h, m.lang)?.[it.li] : null;
+  const ranges = diffPrefs.words && it.ln.k !== ' ' ? lineWordRanges(h, it.li) : null;
+  const eol = it.ln.noeol ? '<span class="noeol" title="No newline at end of file">⏎̸</span>' : '';
+  it.html = decorateLine(it.ln.t, syn, ranges) + eol;
+  it.htmlKey = decoKey();
+  return it.html;
+}
+
+const hunkHtml = (it, btns) => `<div class="hunk" data-h="${it.hi}"><span>${esc(it.head)}</span>${btns}</div>`;
+
+function itemHtml(m, it, btns) {
+  if (it.head !== undefined) return hunkHtml(it, btns);
   const { ln, key } = it;
-  const eol = ln.noeol ? '<span class="noeol" title="No newline at end of file">⏎̸</span>' : '';
   const cls = ln.k === '+' ? ' add' : ln.k === '-' ? ' del' : '';
   const sign = ln.k === '+' ? '+' : ln.k === '-' ? '−' : '';
   const picked = key && S.lineSel.has(key) ? ' picked' : '';
-  return `<div class="dl${cls}${picked}"${key ? ` data-k="${key}"` : ''}><span class="n">${it.o}</span><span class="n">${it.n}</span><span class="s">${sign}</span><span class="t">${esc(ln.t)}${eol}</span></div>`;
+  return `<div class="dl${cls}${picked}"${key ? ` data-k="${key}"` : ''}><span class="n">${it.o}</span><span class="n">${it.n}</span><span class="s">${sign}</span><span class="t">${lineText(m, it)}</span></div>`;
 }
+
+function splitCell(m, it, side) {
+  if (!it) return '<div class="sc empty"></div>';
+  const k = it.ln.k;
+  const cls = k === '+' ? ' add' : k === '-' ? ' del' : '';
+  const picked = it.key && S.lineSel.has(it.key) ? ' picked' : '';
+  const num = side === 'l' ? it.o : it.n;
+  return `<div class="sc dl${cls}${picked}"${it.key ? ` data-k="${it.key}"` : ''}><span class="n">${num}</span><span class="s">${k === '+' ? '+' : k === '-' ? '−' : ''}</span><span class="t">${lineText(m, it)}</span></div>`;
+}
+
+function diffRowHtml(m, row, btns) {
+  if (!diffPrefs.split) return itemHtml(m, row, btns);
+  if (row.head !== undefined) return hunkHtml(row, btns);
+  return `<div class="sr">${splitCell(m, row.l, 'l')}${splitCell(m, row.r, 'r')}</div>`;
+}
+
+const diffRows = (m) => (diffPrefs.split ? splitItems(m) : diffItems(m));
 
 function hunkButtons(m, file) {
   if (!partialOk(file, m)) return '';
@@ -1609,28 +1688,30 @@ function hunkButtons(m, file) {
 function diffHtml(m, file) {
   if (m.binary) return '<div class="diff-empty">Binary file — no text diff available.</div>';
   if (!m.hunks.length) return '<div class="diff-empty">No textual changes (mode change or empty file).</div>';
-  const items = diffItems(m);
-  const picking = partialOk(file, m) ? ' picking' : '';
-  if (items.length <= VIRTUAL_MIN) {
+  const rows = diffRows(m);
+  const cls = `diff-lines${partialOk(file, m) ? ' picking' : ''}${diffPrefs.split ? ' split' : ''}`;
+  if (rows.length <= VIRTUAL_MIN) {
     const btns = hunkButtons(m, file);
-    return `<div class="diff-lines${picking}">${items.map((it) => itemHtml(it, btns)).join('')}</div>`;
+    return `<div class="${cls}">${rows.map((r) => diffRowHtml(m, r, btns)).join('')}</div>`;
   }
-  // Rows are absolutely positioned, so the width comes from the longest line (tabs count as 8).
+  // Rows are absolutely positioned; inline, the width comes from the longest line (tabs count as 8).
   let widest = 0;
-  for (const it of items) if (it.ln) widest = Math.max(widest, it.ln.t.length + 7 * (it.ln.t.split('\t').length - 1));
-  return `<div class="diff-lines virtual${picking}" style="height:${items.length * DL_H}px;width:calc(150px + ${widest + 2}ch)"><div class="v-rows"></div></div>`;
+  for (const it of diffItems(m)) if (it.ln) widest = Math.max(widest, it.ln.t.length + 7 * (it.ln.t.split('\t').length - 1));
+  const width = diffPrefs.split ? '' : `;width:calc(150px + ${widest + 2}ch)`;
+  return `<div class="${cls} virtual" style="height:${rows.length * DL_H}px${width}"><div class="v-rows"></div></div>`;
 }
 
 function renderDiffWindow() {
   const m = S.diffVirtual;
   const host = m && $('#diff-body .v-rows');
   if (!host) return;
+  const rows = diffRows(m);
   const body = $('#diff-body');
   const first = Math.max(0, Math.floor(body.scrollTop / DL_H) - 40);
-  const last = Math.min(m.items.length, Math.ceil((body.scrollTop + body.clientHeight) / DL_H) + 40);
+  const last = Math.min(rows.length, Math.ceil((body.scrollTop + body.clientHeight) / DL_H) + 40);
   const btns = hunkButtons(m, S.file);
   let html = '';
-  for (let i = first; i < last; i++) html += `<div class="vrow" style="top:${i * DL_H}px">${itemHtml(m.items[i], btns)}</div>`;
+  for (let i = first; i < last; i++) html += `<div class="vrow" style="top:${i * DL_H}px">${diffRowHtml(m, rows[i], btns)}</div>`;
   host.innerHTML = html;
 }
 $('#diff-body').addEventListener('scroll', renderDiffWindow, { passive: true });
@@ -1693,9 +1774,10 @@ function diffActionsHtml(file) {
   const nav = file.untracked
     ? ''
     : ['blame', 'history'].filter((m) => m !== file.mode).map((m) => `<button class="mini" data-diff-do="${m}">${m[0].toUpperCase()}${m.slice(1)}</button>`).join('');
-  if (file.mode === 'unstaged') return back + nav + '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>';
-  if (file.mode === 'staged') return back + nav + '<button class="mini" data-diff-do="unstage">Unstage file</button>';
-  return back + nav;
+  const view = file.mode === 'blame' || file.mode === 'history' ? '' : `<button class="mini" data-diff-do="split" title="Switch between inline and side-by-side">${diffPrefs.split ? 'Inline' : 'Side by side'}</button>`;
+  if (file.mode === 'unstaged') return back + view + nav + '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>';
+  if (file.mode === 'staged') return back + view + nav + '<button class="mini" data-diff-do="unstage">Unstage file</button>';
+  return back + view + nav;
 }
 
 /** Open a full-pane view (diff, blame, history) for a file, replacing the current one. */
@@ -1721,12 +1803,13 @@ function showPane(file, path, stats, html, keepScroll) {
 async function showDiff(file, silent = false) {
   S.file = file;
   try {
-    const text = await invoke('get_diff', { repo: S.repo, path: file.path, mode: file.mode, sha: file.sha || null, untracked: !!file.untracked });
+    const text = await invoke('get_diff', { repo: S.repo, path: file.path, mode: file.mode, sha: file.sha || null, sha2: file.sha2 || null, untracked: !!file.untracked });
     if (S.file !== file) return;
     // Keep picked lines only while the diff they refer to is unchanged.
     if (text !== S.diffText) S.lineSel.clear();
     S.diffText = text;
     S.diffModel = parseDiff(text);
+    S.diffModel.lang = langFor(file.path);
     S.lineAnchor = null;
     const m = S.diffModel;
     showPane(file, file.path, `<span class="add-c">+${m.adds}</span> <span class="del-c">−${m.dels}</span>`, diffHtml(m, file), silent);
@@ -1792,6 +1875,11 @@ $('#diff-actions').addEventListener('click', (e) => {
     return refreshPicked();
   }
   if (act === 'back') return openFileView(f.back);
+  if (act === 'split') {
+    diffPrefs.split = !diffPrefs.split;
+    save('gg.diffSplit', diffPrefs.split);
+    return showDiff(f, true);
+  }
   if (act === 'blame') return openFileView({ mode: 'blame', path: f.path, rev: f.mode === 'commit' ? f.sha : null, back: f });
   if (act === 'history') return openFileView({ mode: 'history', path: f.path, back: f });
   const status = f.untracked ? '?' : '';
@@ -1813,6 +1901,8 @@ $('#detail').addEventListener('contextmenu', (e) => {
     null,
     status !== 'D' && ['Open file', () => invoke('reveal', { repo: S.repo, target: 'file', path }).catch((err) => toast(String(err), 'err'))],
     ['Copy path', () => navigator.clipboard.writeText(path).then(() => toast('Path copied'))],
+    null,
+    ...ignoreMenu(path, mode, status),
   ]);
 });
 

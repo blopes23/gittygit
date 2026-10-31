@@ -19,7 +19,10 @@ A fast, native-feeling Git client for macOS (Apple silicon and Intel), built wit
 - Conflict resolution for merges, rebases, cherry-picks, reverts and stash pops: side-by-side ours/theirs per
   conflict with ours / theirs / both / hand-edited results, keep-or-delete for deleted files, whole-version pick for
   binaries, and a banner to continue, skip (rebase) or abort the operation
-- Commit details with changed files; unified diff viewer (big diffs render only the visible rows)
+- Commit details with changed files; diff viewer with inline or side-by-side layout, changed-word highlights and syntax colours ([highlight.js](https://highlightjs.org), BSD-3); big diffs render only the visible rows
+- Select several commits (⌘-click, ⇧-click) to compare two of them, or cherry-pick, revert or squash them together
+- Compare any two commits or branches, or a commit with the working tree: commits on each side and the files that differ
+- Add a file, its extension or its folder to .gitignore from the file's right-click menu
 - File history (follows renames) and blame, from a file's right-click menu or the diff header; click a commit to see its change
 - Interactive rebase (right-click a commit → "Interactive rebase … from here"): reorder, reword, squash, fixup, drop
 - Force push with lease (offered when a push is rejected after an amend/rebase; refuses to overwrite commits you haven't integrated)
