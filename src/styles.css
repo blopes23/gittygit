@@ -217,8 +217,9 @@ input, textarea { font: inherit; color: var(--text); }
 .f-row {
   display: flex; align-items: center; gap: 8px; padding: 3px 14px; font-size: 12px; white-space: nowrap;
 }
-.f-row:hover { background: var(--bg-hover); }
-.f-row.sel { background: var(--bg-sel); }
+.f-row { position: relative; --row-bg: transparent; background: var(--row-bg); }
+.f-row:hover { --row-bg: var(--bg-hover); }
+.f-row.sel { --row-bg: var(--bg-sel); }
 .f-row .st { width: 16px; text-align: center; font-weight: 700; font-family: var(--mono); font-size: 11px; flex: none; }
 .f-row .p { flex: 1; min-width: 0; display: flex; overflow: hidden; white-space: nowrap; }
 /* RTL box clips the folder from the left; the inner span keeps the path's own order. */
@@ -227,8 +228,14 @@ input, textarea { font: inherit; color: var(--text); }
 .f-row .p .base { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .f-row .p .ell { display: none; flex: none; color: var(--text-dim); }
 .f-row .p.cut .ell { display: inline; }
-.f-row .acts { display: none; gap: 4px; }
-.f-row:hover .acts { display: flex; }
+/* Hover actions float over the end of the row (fading the path out beneath them), so showing
+   them changes neither the row's height nor where the path is cut. */
+.f-row .acts {
+  position: absolute; right: 0; top: 0; bottom: 0; display: flex; align-items: center; gap: 4px;
+  padding: 0 10px 0 24px; visibility: hidden;
+  background: linear-gradient(to right, transparent, var(--row-bg) 18px);
+}
+.f-row:hover .acts { visibility: visible; }
 .st-M { color: var(--yellow); } .st-A, .st-\? { color: var(--green); } .st-D { color: var(--red); }
 .st-R, .st-C { color: var(--accent); } .st-U { color: var(--orange); } .st-T { color: var(--accent-2); }
 .f-empty { padding: 8px 14px; color: var(--text-faint); font-size: 12px; font-style: italic; }
