@@ -599,10 +599,10 @@ button:disabled { opacity: .45; }
 .st-form { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
 .st-form h3 { margin: 0 0 4px; font-size: 15px; }
 .st-form .fld { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); margin-top: 6px; }
-.st-form select, .st-form input {
+.st-form select, .st-form input:not([type="checkbox"]) {
   background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; outline: none; font-size: 13px;
 }
-.st-form select:focus, .st-form input:focus { border-color: var(--accent); }
+.st-form select:focus, .st-form input:not([type="checkbox"]):focus { border-color: var(--accent); }
 .st-form .hint { color: var(--text-faint); font-size: 11px; margin: 0; }
 .st-form .hint a { color: var(--accent); }
 .st-form menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 12px 0 0; }
@@ -619,7 +619,11 @@ button:disabled { opacity: .45; }
 .diff-lines.virtual .sc { height: 19px; line-height: 19px; }
 .dl.del .wd { background: color-mix(in srgb, var(--red) 38%, transparent); border-radius: 2px; }
 .dl.add .wd { background: color-mix(in srgb, var(--green) 34%, transparent); border-radius: 2px; }
-.st-form .chk { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 12px; }
+.st-group { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.st-group .st-label { font-size: 12px; color: var(--text-dim); }
+.st-form .st-check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 12px; cursor: pointer; }
+.st-form .st-check input { flex: none; width: 14px; height: 14px; margin: 0; }
+.st-form .st-check span { flex: 1; min-width: 0; }
 
 /* syntax colours (highlight.js classes), tuned for the dark palette */
 .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-doctag { color: #c792ea; }
@@ -729,3 +733,19 @@ button:disabled { opacity: .45; }
 .special-diff ul { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; }
 .special-diff li { padding: 2px 0; display: flex; gap: 8px; }
 .special-diff li.add span { color: var(--green); } .special-diff li.del span { color: var(--red); }
+
+/* Diff header: one line; the path gives way (folder clipped from the left) before the buttons do. */
+.diff-head { overflow: hidden; }
+#diff-path { display: flex; min-width: 0; flex: 0 1 auto; overflow: hidden; white-space: nowrap; }
+#diff-path .dir { flex: 0 1 auto; min-width: 0; overflow: hidden; direction: rtl; color: var(--text-dim); }
+#diff-path .dir > span { direction: ltr; unicode-bidi: isolate; }
+#diff-path .base { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+#diff-path .ell { display: none; flex: none; color: var(--text-dim); }
+#diff-path.cut .ell { display: inline; }
+#diff-stats, #diff-actions, #diff-actions .mini, #diff-close, .diff-head > .i { flex: none; white-space: nowrap; }
+#diff-view { container: diffpane / inline-size; }
+.diff-head .mini.more { display: none; }
+@container diffpane (max-width: 720px) {
+  .diff-head .mini.sec { display: none; }
+  .diff-head .mini.more { display: inline-block; }
+}

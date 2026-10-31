@@ -1800,11 +1800,13 @@ function diffActionsHtml(file) {
   const back = file.back ? '<button class="mini" data-diff-do="back">← Back</button>' : '';
   const nav = file.untracked
     ? ''
-    : ['blame', 'history'].filter((m) => m !== file.mode).map((m) => `<button class="mini" data-diff-do="${m}">${m[0].toUpperCase()}${m.slice(1)}</button>`).join('');
-  const view = file.mode === 'blame' || file.mode === 'history' ? '' : `<button class="mini" data-diff-do="split" title="Switch between inline and side-by-side">${diffPrefs.split ? 'Inline' : 'Side by side'}</button>`;
-  if (file.mode === 'unstaged') return back + view + nav + '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>';
-  if (file.mode === 'staged') return back + view + nav + '<button class="mini" data-diff-do="unstage">Unstage file</button>';
-  return back + view + nav;
+    : ['blame', 'history'].filter((m) => m !== file.mode).map((m) => `<button class="mini sec" data-diff-do="${m}">${m[0].toUpperCase()}${m.slice(1)}</button>`).join('');
+  const view = file.mode === 'blame' || file.mode === 'history' ? '' : `<button class="mini sec" data-diff-do="split" title="Switch between inline and side-by-side">${diffPrefs.split ? 'Inline' : 'Side by side'}</button>`;
+  // Shown instead of the .sec buttons when the pane is narrow (see styles.css).
+  const more = view || nav ? '<button class="mini more" data-diff-do="more" title="More actions">⋯</button>' : '';
+  if (file.mode === 'unstaged') return back + view + nav + more + '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>';
+  if (file.mode === 'staged') return back + view + nav + more + '<button class="mini" data-diff-do="unstage">Unstage file</button>';
+  return back + view + nav + more;
 }
 
 /** Open a full-pane view (diff, blame, history) for a file, replacing the current one. */
@@ -1816,7 +1818,11 @@ function openFileView(file) {
 
 function showPane(file, path, stats, html, keepScroll) {
   S.diffVirtual = null;
-  $('#diff-path').textContent = path;
+  // Folder shortened from the left, file name kept whole (like the file lists).
+  const slash = path.lastIndexOf('/');
+  const el = $('#diff-path');
+  el.innerHTML = `<span class="ell">…</span><span class="dir"><span>${esc(path.slice(0, slash + 1))}</span></span><span class="base">${esc(path.slice(slash + 1))}</span>`;
+  el.title = path;
   $('#diff-stats').innerHTML = stats;
   $('#diff-actions').innerHTML = diffActionsHtml(file);
   const body = $('#diff-body');
@@ -1824,8 +1830,16 @@ function showPane(file, path, stats, html, keepScroll) {
   body.innerHTML = html;
   body.scrollTop = keep;
   $('#diff-view').hidden = false;
+  markCutPath();
   document.querySelectorAll('#detail .f-row').forEach((r) => r.classList.toggle('sel', r.dataset.path === file.path && r.dataset.mode === file.mode));
 }
+
+/** Show the leading "…" in the diff header only when the folder part is actually clipped. */
+function markCutPath() {
+  const d = $('#diff-path .dir');
+  if (d) $('#diff-path').classList.toggle('cut', d.scrollWidth > d.clientWidth + 1);
+}
+new ResizeObserver(() => markCutPath()).observe($('#diff-view'));
 
 async function showDiff(file, silent = false) {
   S.file = file;
@@ -1908,6 +1922,10 @@ $('#diff-actions').addEventListener('click', (e) => {
     return refreshPicked();
   }
   if (act === 'back') return openFileView(f.back);
+  if (act === 'more') {
+    const r = b.getBoundingClientRect();
+    return showMenu({ clientX: r.left, clientY: r.bottom + 4 }, [...$('#diff-actions').querySelectorAll('.sec')].map((x) => [x.textContent, () => x.click()]));
+  }
   if (act === 'split') {
     diffPrefs.split = !diffPrefs.split;
     save('gg.diffSplit', diffPrefs.split);

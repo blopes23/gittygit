@@ -143,9 +143,10 @@
           <option value="rebase">Rebase</option><option value="ff-only">Fast-forward only (stop instead)</option>
         </select></label>
       <small class="hint">Repositories with their own choice (Pull ▾) keep it. <a href="#" id="st-reset-pull">Clear per-repository choices</a></small>
-      <div class="fld">Diffs
-        <label class="chk"><input type="checkbox" id="st-words"> Highlight the changed words in modified lines</label>
-        <label class="chk"><input type="checkbox" id="st-syntax"> Syntax colours</label>
+      <div class="st-group">
+        <span class="st-label">Diffs</span>
+        <label class="st-check"><input type="checkbox" id="st-words"><span>Highlight the changed words in modified lines</span></label>
+        <label class="st-check"><input type="checkbox" id="st-syntax"><span>Syntax colours</span></label>
       </div>
       <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Save</button></menu>
     </form>
