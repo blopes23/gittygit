@@ -64,6 +64,7 @@ const S = {
   flash: null, // commit briefly highlighted in the graph
   fetching: null, // promise of a running background fetch
   remoteTags: new Map(), // repo -> Set of tag names on its default remote (null while loading)
+  prs: new Map(), // repo -> { slug, prs, authed } | { error } | null while loading (see github.js)
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -388,6 +389,7 @@ async function refresh() {
     else if (S.matches.length) runSearch($('#search').value, false);
     if (snap.graph) suggestCommitGraph();
     if (!S.remoteTags.has(repo) && refs.remote_names.length) updateRemoteTags(repo);
+    if (!S.prs.has(repo) && refs.remote_names.length) updatePRs(repo);
   } catch (e) {
     toast(String(e), 'err');
   } finally {
@@ -533,10 +535,14 @@ const ACTIONS = {
 document.querySelectorAll('[data-act]').forEach((b) =>
   b.addEventListener('click', (e) => {
     if (!S.repo) return;
-    if (e.target.closest('.act-more')) return pullMenu(e);
     ACTIONS[b.dataset.act]?.();
   }),
 );
+$('#pull-more').addEventListener('click', (e) => {
+  if (!S.repo) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  pullMenu({ clientX: r.left - 60, clientY: r.bottom + 4 });
+});
 $('[data-act="pull"]').addEventListener('contextmenu', (e) => {
   e.preventDefault();
   if (S.repo) pullMenu(e);
@@ -561,7 +567,7 @@ function renderSidebar() {
     .map((b) => {
       const track = [b.ahead ? `↑${b.ahead}` : '', b.behind ? `↓${b.behind}` : ''].join(' ').trim();
       const cls = [b.current && 'current', S.sbSel.has(b.name) && 'sel'].filter(Boolean).join(' ');
-      return item('local', b.name, b.sha, b.current ? 'check' : 'branch', track ? `<span class="track">${track}</span>` : '', cls);
+      return item('local', b.name, b.sha, b.current ? 'check' : 'branch', prBadge(b.name) + (track ? `<span class="track">${track}</span>` : ''), cls);
     })
     .join('');
 
@@ -590,6 +596,7 @@ function renderSidebar() {
     selbar +
     section('local', 'Local', r.branches.length, local || empty('No branches')) +
     section('remote', 'Remote', r.remotes.length, remotes || empty('No remotes')) +
+    prSection(section, empty) +
     section('tags', 'Tags', r.tags.length, tags || empty('No tags')) +
     section('stashes', 'Stashes', r.stashes.length, stashes || empty('No stashes'));
 
@@ -629,6 +636,10 @@ $('#sidebar').addEventListener('click', (e) => {
     const [a, b] = [order.indexOf(S.sbAnchor), order.indexOf(name)].sort((x, y) => x - y);
     if (a >= 0) return setBranchSelection(order.slice(a, b + 1));
   }
+  if (kind === 'pr') {
+    if (S.index.has(it.dataset.sha)) jumpTo(it.dataset.sha);
+    return;
+  }
   setBranchSelection(kind === 'local' ? [name] : [], kind === 'local' ? name : null);
   jumpTo(it.dataset.sha);
 });
@@ -650,6 +661,7 @@ $('#sidebar').addEventListener('dblclick', (e) => {
   if (it.dataset.kind === 'local') checkoutLocal(it.dataset.name);
   if (it.dataset.kind === 'remote') checkoutRemote(it.dataset.name);
   if (it.dataset.kind === 'stash') git(['stash', 'apply', `stash@{${it.dataset.index}}`], 'Stash applied');
+  if (it.dataset.kind === 'pr') checkoutPR(+it.dataset.name);
 });
 $('#sidebar').addEventListener('contextmenu', (e) => {
   const it = e.target.closest('.sb-item');
@@ -722,6 +734,7 @@ function checkoutRemote(remoteName) {
 }
 
 function refMenu(kind, name, sha) {
+  if (kind === 'pr') return prMenu(+name);
   const cur = currentBranch()?.name;
   if (kind === 'tag') {
     const remote = defaultRemote();
@@ -764,6 +777,7 @@ function refMenu(kind, name, sha) {
     isCur && ['Pull', () => ACTIONS.pull()],
     null,
     ['Create branch here…', () => newBranchAt(sha)],
+    br && prMenuItem(br),
     br && [`Rename ${name}…`, () => renameBranch(br)],
     br && [br.upstream ? `Change tracked branch (${br.upstream})…` : 'Track remote branch…', () => trackBranch(br)],
     br?.upstream && [`Stop tracking ${br.upstream}`, () => git(['branch', '--unset-upstream', name], `${name} no longer tracks ${br.upstream}`)],

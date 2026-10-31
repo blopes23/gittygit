@@ -33,6 +33,9 @@ A fast, native-feeling Git client for macOS (Apple silicon and Intel), built wit
 - Push or delete tags on the remote; tags that aren't pushed yet are marked "local"
 - Rename branches (optionally on the remote too), track or stop tracking a remote branch
 - HTTPS sign-in failures offer to switch the remote to SSH or store an access token in git's credential store
+- Recover lost commits (Gittygit → Recover Lost Commits…): recent HEAD/branch history from the reflog, plus a deep scan for dropped stashes and deleted work; preview, recreate as a branch or reset to it
+- Command palette (⌘K): fuzzy-search actions, branches, tabs and profiles
+- GitHub pull requests: open PRs with CI status in the sidebar, PR badges on branches, create a PR (opens GitHub's compare page), check out any PR by number; an optional per-profile token (stored in the Keychain) adds private repositories
 - Gittygit → Copy Diagnostics for bug reports; errors are logged to `~/Library/Logs/Gittygit/` with paths and tokens masked
 - Context menus: checkout, merge, rebase, cherry-pick, revert, reset soft/mixed/hard, tag, delete branch
 - Live refresh via FSEvents (`notify`) when files or refs change; changes git ignores (build output, `node_modules`) don't trigger it, and the commit graph is only reloaded when refs or HEAD move

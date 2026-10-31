@@ -58,7 +58,7 @@ async function pull(mode = pullMode()) {
 
 function pullMenu(e) {
   const cur = pullMode();
-  const mark = (m) => (m === cur ? '✓ ' : '    ');
+  const mark = (m) => (m === cur ? '✓\u2002' : '\u2003\u2002'); // em space keeps unchecked items aligned
   showMenu(e, [
     ['Pull with merge', () => pull('merge')],
     ['Pull with rebase', () => pull('rebase')],
@@ -90,6 +90,7 @@ async function autoFetch(minAge) {
       AUTO.fails = 0;
       AUTO.error = null;
       updateRemoteTags(repo);
+      updatePRs(repo);
     } catch (e) {
       AUTO.fails++;
       AUTO.error = explainGitError(String(e));
@@ -113,6 +114,7 @@ function fetchSucceeded(repo) {
   AUTO.error = null;
   renderFetchState();
   updateRemoteTags(repo);
+  updatePRs(repo);
 }
 
 function renderFetchState() {

@@ -1131,6 +1131,7 @@ name = "gittygit"
 version = "0.2.1"
 dependencies = [
  "notify",
+ "security-framework",
  "serde",
  "serde_json",
  "tauri",

@@ -414,7 +414,8 @@ $('#recent-list').addEventListener('click', (e) => {
 
 // ------------------------------------------------------------------ profile editor
 
-const ED = { draft: null, cur: null, keys: [] };
+// tokens: profile id -> { saved, next } where next is a new token, '' to remove, or null (unchanged).
+const ED = { draft: null, cur: null, keys: [], tokens: new Map() };
 const dlg = $('#profiles-dlg');
 const newId = (name) => `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'profile'}-${Math.random().toString(36).slice(2, 6)}`;
 
@@ -422,6 +423,8 @@ async function openProfileEditor({ create = false } = {}) {
   ED.draft = clone(S.store);
   ED.cur = S.store.active;
   ED.keys = await invoke('list_ssh_keys').catch(() => []);
+  ED.tokens = new Map();
+  for (const p of ED.draft.profiles) ED.tokens.set(p.id, { saved: await invoke('has_github_token', { profileId: p.id }).catch(() => false), next: null });
   if (create) addDraftProfile();
   renderEditor();
   dlg.showModal();
@@ -443,6 +446,7 @@ function addDraftProfile() {
     terminal_repos: [],
   };
   ED.draft.profiles.push(p);
+  ED.tokens.set(p.id, { saved: false, next: null });
   ED.cur = p.id;
 }
 
@@ -476,6 +480,10 @@ function renderEditor() {
   $('#pf-test-out').textContent = '';
   $('#pf-test-out').className = 'test-out';
   $('#pf-owners').value = p.remote_owners.join('\n');
+  const tok = ED.tokens.get(p.id) || { saved: false, next: null };
+  $('#pf-ghtoken').value = tok.next || '';
+  $('#pf-ghtoken').placeholder = tok.next === '' ? 'Will be removed on Save' : tok.saved ? 'Saved in Keychain — type to replace' : 'ghp_… or github_pat_…';
+  $('#pf-ghclear').disabled = !tok.saved && !tok.next;
 
   $('#pf-repos').innerHTML = p.tabs.length
     ? p.tabs
@@ -515,6 +523,15 @@ $('#pf-colors').addEventListener('click', (e) => {
   const b = e.target.closest('[data-color]');
   if (!b) return;
   draftProfile().color = b.dataset.color;
+  renderEditor();
+});
+$('#pf-ghtoken').addEventListener('input', (e) => {
+  const tok = ED.tokens.get(ED.cur);
+  tok.next = e.target.value.trim() || null;
+  $('#pf-ghclear').disabled = !tok.saved && !tok.next;
+});
+$('#pf-ghclear').addEventListener('click', () => {
+  ED.tokens.get(ED.cur).next = '';
   renderEditor();
 });
 $('#pf-key').addEventListener('change', (e) => {
@@ -583,9 +600,17 @@ $('#pf-save').addEventListener('click', async () => {
   const prevRepo = S.repo;
   try {
     await serialize(() => commitStore(ED.draft));
+    // Tokens go to the Keychain; deleted profiles lose theirs.
+    for (const [id, tok] of ED.tokens) {
+      const gone = !profileById(id, ED.draft);
+      if (gone && tok.saved) await invoke('set_github_token', { profileId: id, token: '' });
+      else if (!gone && tok.next !== null) await invoke('set_github_token', { profileId: id, token: tok.next });
+    }
   } catch (e) {
     return toast(String(e), 'err');
   }
+  $('#pf-ghtoken').value = '';
+  if ([...ED.tokens.values()].some((t) => t.next !== null)) S.prs.clear();
   dlg.close();
   toast('Profiles saved', 'ok');
   renderProfileChrome();

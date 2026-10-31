@@ -582,8 +582,6 @@ button:disabled { opacity: .45; }
 }
 
 /* ------------------------------------------------------------ remotes & settings */
-.act-more { margin-left: 2px; padding: 0 2px; border-radius: 3px; font-size: 9px; color: var(--text-dim); }
-.act-more:hover { background: var(--bg-3); color: var(--text); }
 .act.warn::after {
   content: ""; position: absolute; top: 3px; left: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--orange);
 }
@@ -645,3 +643,68 @@ button:disabled { opacity: .45; }
 .cmp-commit .avatar { width: 20px; height: 20px; font-size: 8px; }
 .cmp-commit .s { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cmp-commit code { color: var(--text-faint); font-size: 11px; }
+
+/* ------------------------------------------------------------ pull requests */
+.pr-item .pr-num { font-family: var(--mono); font-size: 11px; color: var(--text-dim); flex: none; }
+.pr-item.draft .name { color: var(--text-dim); font-style: italic; }
+.pr-err { white-space: normal; font-style: normal; line-height: 1.35; }
+.chk { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-faint); }
+.chk-success { background: var(--green); } .chk-failure { background: var(--red); } .chk-pending { background: var(--yellow); }
+.pr-badge {
+  font-family: var(--mono); font-size: 10px; padding: 0 4px; border-radius: 3px; line-height: 14px;
+  border: 1px solid var(--border); color: var(--text-dim); flex: none;
+}
+.pr-badge.chk-success, .pr-badge.chk-failure, .pr-badge.chk-pending { background: none; }
+.pr-badge.chk-success { border-color: color-mix(in srgb, var(--green) 60%, transparent); color: var(--green); }
+.pr-badge.chk-failure { border-color: color-mix(in srgb, var(--red) 60%, transparent); color: var(--red); }
+.pr-badge.chk-pending { border-color: color-mix(in srgb, var(--yellow) 60%, transparent); color: var(--yellow); }
+
+/* ------------------------------------------------------------ recover */
+#recover-dlg {
+  width: min(820px, 94vw); max-height: 86vh; padding: 0; overflow: hidden; background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
+}
+#recover-dlg::backdrop { background: rgba(0, 0, 0, .45); }
+.rc { display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; max-height: 86vh; }
+.rc-head { display: flex; align-items: center; gap: 10px; }
+.rc-head h3 { margin: 0; font-size: 15px; }
+.rc .hint { margin: 0; color: var(--text-faint); font-size: 11px; }
+.seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { background: none; border: 0; padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
+.seg button.on { background: var(--bg-sel); color: var(--text); }
+.rc-list { flex: 1; min-height: 160px; max-height: 42vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.rc-row { display: grid; grid-template-columns: 92px 120px 1fr auto; gap: 10px; align-items: center; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.rc-row:hover { background: var(--bg-hover); }
+.rc-row.sel { background: var(--bg-sel); }
+.rc-row .rc-time { color: var(--text-dim); white-space: nowrap; }
+.rc-row .rc-act { color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-row .rc-subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-row code { color: var(--text-faint); font-size: 11px; }
+.rc-preview { min-height: 70px; max-height: 22vh; overflow-y: auto; padding: 8px 10px; border-radius: 8px; background: var(--bg-3); font-size: 12px; user-select: text; -webkit-user-select: text; }
+.rc-preview code { font-family: var(--mono); }
+.rc-files { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.rc-files .st { display: inline-block; width: 14px; font-weight: 700; }
+.rc menu { display: flex; gap: 8px; padding: 0; margin: 4px 0 0; }
+
+/* ------------------------------------------------------------ command palette */
+#palette { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, .35); display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+#palette[hidden] { display: none; }
+.pal-box { width: min(620px, 92vw); background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, .55); overflow: hidden; }
+#pal-input { width: 100%; border: 0; border-bottom: 1px solid var(--border); background: transparent; padding: 14px 16px; font-size: 15px; outline: none; color: var(--text); }
+#pal-list { max-height: 50vh; overflow-y: auto; padding: 6px; }
+.pal-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.pal-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal-item small { color: var(--text-faint); font-size: 11px; flex: none; }
+.pal-item.sel { background: var(--accent); color: #08202b; }
+.pal-item.sel small { color: #08202b; opacity: .7; }
+.pal-empty { padding: 14px; color: var(--text-faint); text-align: center; font-size: 12px; }
+
+/* Pull ▾: split button, the caret is its own full-height target */
+.act-split { display: flex; align-items: stretch; border-radius: 6px; }
+.act-split .act[data-act="pull"] { border-radius: 6px 0 0 6px; padding-right: 6px; }
+.act-split .act-caret {
+  flex-direction: row; justify-content: center; align-items: center; width: 20px; padding: 0;
+  border-radius: 0 6px 6px 0; color: var(--text-dim); border-left: 1px solid transparent;
+}
+.act-split:hover .act-caret { border-left-color: var(--border); }
+.act-split .act-caret:hover { color: var(--text); background: var(--bg-hover); }

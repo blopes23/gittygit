@@ -21,7 +21,7 @@
       </div>
     </div>
     <div class="tb-group tb-center" data-tauri-drag-region>
-      <button class="act" data-act="pull" title="Pull"><span class="i" data-icon="pull"></span><span>Pull<span class="act-more" title="Pull options">▾</span></span><em id="behind-badge"></em></button>
+      <span class="act-split"><button class="act" data-act="pull" title="Pull"><span class="i" data-icon="pull"></span><span>Pull</span><em id="behind-badge"></em></button><button class="act act-caret" id="pull-more" title="Pull options" aria-label="Pull options"><svg viewBox="0 0 10 6" width="10" height="6"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></span>
       <button class="act" data-act="push" title="Push"><span class="i" data-icon="push"></span><span>Push</span><em id="ahead-badge"></em></button>
       <button class="act" data-act="fetch" title="Fetch all"><span class="i" data-icon="fetch"></span><span>Fetch</span></button>
       <button class="act" data-act="branch" title="New branch"><span class="i" data-icon="branch"></span><span>Branch</span></button>
@@ -122,6 +122,8 @@
   </dialog>
 
   <dialog id="rebase-dlg"></dialog>
+  <dialog id="recover-dlg"></dialog>
+  <div id="palette" hidden><div class="pal-box"><input id="pal-input" placeholder="Type a command, branch, tab or profile…" spellcheck="false" autocomplete="off"><div id="pal-list"></div></div></div>
 
   <dialog id="settings-dlg">
     <form method="dialog" class="st-form">
@@ -185,6 +187,10 @@
         <pre id="pf-test-out" class="test-out"></pre>
         <small class="hint">Fetch, pull, push and clone use only this key (IdentitiesOnly), so ssh-agent can't pick another account.</small>
 
+        <h4>GitHub token <small class="hint">optional</small></h4>
+        <div class="line"><input id="pf-ghtoken" type="password" spellcheck="false" autocomplete="off" placeholder="ghp_… or github_pat_…"><button class="ghost" id="pf-ghclear">Remove</button></div>
+        <small class="hint">Shows pull requests and CI checks for private repositories (public ones work without it). Read-only access to pull requests and checks is enough. Stored in the macOS Keychain, not in Gittygit's settings.</small>
+
         <h4>Expected remote owners</h4>
         <textarea id="pf-owners" spellcheck="false" placeholder="github.com/acme-corp&#10;gitlab.company.io"></textarea>
         <small class="hint">One per line: host/owner, owner, or host. You're warned when opening or pushing a repo whose remote isn't listed. Empty = no check.</small>
@@ -211,7 +217,10 @@
   <script src="compare.js"></script>
   <script src="profiles.js"></script>
   <script src="remote.js"></script>
+  <script src="github.js"></script>
   <script src="settings.js"></script>
+  <script src="recover.js"></script>
+  <script src="palette.js"></script>
   <script src="updates.js"></script>
 </body>
 </html>

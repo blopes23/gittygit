@@ -531,6 +531,77 @@ pub fn compare(repo: &str, a: &str, b: Option<&str>) -> R<Compare> {
     })
 }
 
+// ---------------------------------------------------------------- recovery
+
+#[derive(Serialize)]
+pub struct ReflogEntry {
+    pub sha: String,
+    /// Which ref moved, e.g. "HEAD@{3}" or "refs/heads/main@{1}".
+    pub selector: String,
+    /// What git recorded, e.g. "commit: Fix x", "reset: moving to HEAD~2", "rebase (finish): …".
+    pub action: String,
+    pub time: i64,
+    pub subject: String,
+    pub author: String,
+}
+
+/// Where HEAD and every branch have pointed recently (`git log -g --all`), newest first.
+pub fn reflog(repo: &str, max: usize) -> R<Vec<ReflogEntry>> {
+    let n = format!("-n{max}");
+    let out = run_codes(repo, &["log", "-g", "--all", &n, "--date=unix", "--format=%H%x1f%gD%x1f%gs%x1f%gd%x1f%s%x1f%an"], &[0, 128])?;
+    let mut list: Vec<ReflogEntry> = out
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(US).collect();
+            if f.len() < 6 {
+                return None;
+            }
+            // With --date=unix, %gd renders as "ref@{<seconds>}".
+            let time = f[3].rsplit_once("@{").and_then(|(_, t)| t.trim_end_matches('}').parse().ok()).unwrap_or(0);
+            Some(ReflogEntry { sha: f[0].into(), selector: f[1].into(), action: f[2].into(), time, subject: f[4].into(), author: f[5].into() })
+        })
+        .collect();
+    list.sort_by(|a, b| b.time.cmp(&a.time));
+    Ok(list)
+}
+
+/// Commits nothing points to any more, not even the reflog (dropped stashes, commits from
+/// deleted branches whose reflog is gone), newest first. Slower: runs `git fsck`.
+pub fn unreachable(repo: &str, max: usize) -> R<Vec<LogEntry>> {
+    let out = run_codes(repo, &["fsck", "--unreachable", "--no-reflogs", "--no-progress"], &[0, 1, 2])?;
+    let shas: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("unreachable commit ")).map(str::trim).collect();
+    if shas.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut args = vec!["log", "--no-walk=unsorted", "--format=%H%x1f%s%x1f%an%x1f%ae%x1f%ct"];
+    args.extend(shas.iter().copied());
+    let mut list: Vec<LogEntry> = run(repo, &args)?
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(US).collect();
+            (f.len() == 5).then(|| LogEntry { sha: f[0].into(), subject: f[1].into(), author: f[2].into(), email: f[3].into(), time: f[4].parse().unwrap_or(0) })
+        })
+        .collect();
+    list.sort_by(|a, b| b.time.cmp(&a.time));
+    list.truncate(max);
+    Ok(list)
+}
+
+/// The remote's default branch name (from refs/remotes/<remote>/HEAD, else main/master).
+pub fn default_branch(repo: &str, remote: &str) -> String {
+    if let Ok(r) = run(repo, &["symbolic-ref", "--short", &format!("refs/remotes/{remote}/HEAD")]) {
+        if let Some((_, b)) = r.trim().split_once('/') {
+            return b.to_string();
+        }
+    }
+    for b in ["main", "master"] {
+        if run(repo, &["rev-parse", "-q", "--verify", &format!("refs/remotes/{remote}/{b}")]).is_ok() {
+            return b.into();
+        }
+    }
+    "main".into()
+}
+
 /// Append a pattern to the repository's root .gitignore (created if needed), once.
 pub fn add_to_gitignore(repo: &str, pattern: &str) -> R<bool> {
     let pattern = pattern.trim();
@@ -1363,6 +1434,26 @@ mod tests {
         assert!(!add_to_gitignore(&r, "*.log").unwrap(), "already present");
         assert!(add_to_gitignore(&r, "a\nb").is_err());
         assert_eq!(std::fs::read_to_string(Path::new(&r).join(".gitignore")).unwrap(), "*.log\n");
+        std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn finds_lost_commits() {
+        let r = repo();
+        commit(&r, "f", "1\n", "A");
+        let b = commit(&r, "f", "2\n", "B");
+        run(&r, &["reset", "-q", "--hard", "HEAD~1"]).unwrap();
+        let log = reflog(&r, 50).unwrap();
+        assert!(log.iter().any(|e| e.sha == b && e.action.starts_with("commit")), "reset-away commit is in the reflog");
+        assert!(log[0].action.starts_with("reset"), "newest first: {}", log[0].action);
+        assert!(log.iter().all(|e| e.time > 0));
+        // A dropped stash is only found by the deep scan.
+        std::fs::write(Path::new(&r).join("f"), "wip\n").unwrap();
+        run(&r, &["stash", "-q"]).unwrap();
+        let stash = run(&r, &["rev-parse", "stash@{0}"]).unwrap().trim().to_string();
+        run(&r, &["stash", "drop", "-q"]).unwrap();
+        assert!(unreachable(&r, 50).unwrap().iter().any(|e| e.sha == stash));
+        assert_eq!(default_branch(&r, "origin"), "main");
         std::fs::remove_dir_all(&r).unwrap();
     }
 }

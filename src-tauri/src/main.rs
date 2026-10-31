@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod git;
+mod github;
 mod graph;
 mod profiles;
 mod updater;
@@ -439,6 +440,42 @@ fn log_error(message: String) {
 }
 
 #[tauri::command(async)]
+fn get_reflog(repo: String) -> R<Vec<git::ReflogEntry>> {
+    git::reflog(&repo, 500)
+}
+
+#[tauri::command(async)]
+fn get_unreachable(repo: String) -> R<Vec<git::LogEntry>> {
+    git::unreachable(&repo, 300)
+}
+
+#[tauri::command(async)]
+fn default_branch(repo: String, remote: String) -> String {
+    git::default_branch(&repo, &remote)
+}
+
+#[tauri::command(async)]
+fn pull_requests(profile_id: String, repo: String, remote: String) -> R<github::PullRequests> {
+    profiles::load().for_repo(&profile_id, &repo)?;
+    github::pull_requests(&repo, &remote, &profile_id)
+}
+
+#[tauri::command(async)]
+fn has_github_token(profile_id: String) -> bool {
+    github::get_token(&profile_id).is_some()
+}
+
+/// Save a profile's GitHub token in the Keychain (an empty token removes it).
+#[tauri::command(async)]
+fn set_github_token(profile_id: String, token: String) -> R<()> {
+    // Removing is allowed for deleted profiles too (their token is cleaned up after the save).
+    if !token.trim().is_empty() {
+        profiles::load().get(&profile_id)?;
+    }
+    github::set_token(&profile_id, &token)
+}
+
+#[tauri::command(async)]
 fn reveal(repo: String, target: String, path: Option<String>) -> R<()> {
     let mut cmd = std::process::Command::new("open");
     match target.as_str() {
@@ -452,6 +489,14 @@ fn reveal(repo: String, target: String, path: Option<String>) -> R<()> {
                 return Err(format!("{rel} not found"));
             }
             cmd.arg(full)
+        }
+        // Web pages (GitHub compare/PR pages) in the default browser.
+        "url" => {
+            let url = path.ok_or("missing url")?;
+            if !url.starts_with("https://") || url.contains(char::is_whitespace) {
+                return Err("only https links can be opened".into());
+            }
+            cmd.arg(url)
         }
         _ => return Err("unknown target".into()),
     };
@@ -543,6 +588,12 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "store_https_credential" => json!(store_https_credential(s("profile_id"), repo, s("host"), s("username"), s("token"))?),
         "diagnostics" => json!({ "app": env!("CARGO_PKG_VERSION"), "arch": std::env::consts::ARCH, "git_version": git::run(".", &["--version"]).unwrap_or_default().trim() }),
         "log_error" => json!(log_error(s("message"))),
+        "get_reflog" => to_value(get_reflog(repo)?).unwrap(),
+        "get_unreachable" => to_value(get_unreachable(repo)?).unwrap(),
+        "default_branch" => json!(default_branch(repo, s("remote"))),
+        "pull_requests" => to_value(pull_requests(s("profile_id"), repo, s("remote"))?).unwrap(),
+        "has_github_token" => json!(has_github_token(s("profile_id"))),
+        "set_github_token" => json!(set_github_token(s("profile_id"), s("token"))?),
         "git_run" => {
             let argv = serde_json::from_value(get("args").unwrap_or_default()).map_err(|e| e.to_string())?;
             json!(git_run(s("profile_id"), repo, argv)?)
@@ -577,6 +628,7 @@ fn main() {
                 let items = [
                     MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
                     MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
+                    MenuItem::with_id(app, "recover", "Recover Lost Commits…", true, None::<&str>)?,
                     MenuItem::with_id(app, "diagnostics", "Copy Diagnostics", true, None::<&str>)?,
                 ];
                 for (i, item) in items.iter().enumerate() {
@@ -589,6 +641,7 @@ fn main() {
                     "check-updates" => "menu-check-updates",
                     "settings" => "menu-settings",
                     "diagnostics" => "menu-diagnostics",
+                    "recover" => "menu-recover",
                     _ => return,
                 };
                 let _ = app.emit(name, ());
@@ -640,6 +693,12 @@ fn main() {
             store_https_credential,
             diagnostics,
             log_error,
+            get_reflog,
+            get_unreachable,
+            default_branch,
+            pull_requests,
+            has_github_token,
+            set_github_token,
             reveal,
             updater::check_update,
             updater::install_update

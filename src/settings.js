@@ -59,6 +59,7 @@ async function copyDiagnostics() {
 
 listen('menu-settings', openSettings);
 listen('menu-diagnostics', copyDiagnostics);
+listen('menu-recover', () => openRecover());
 // The menu's ⌘, accelerator handles this in the app; the key handler covers the dev browser.
 document.addEventListener('keydown', (e) => {
   if (e.metaKey && e.key === ',') {
