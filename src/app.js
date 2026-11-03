@@ -685,9 +685,13 @@ function renderSidebar() {
 }
 
 function setBranchSelection(names, anchor = S.sbAnchor) {
+  const prev = S.sbSel;
   S.sbSel = new Set(names);
   S.sbAnchor = anchor;
-  renderSidebar();
+  // The "N selected" bar only exists for multiple branches; otherwise just move the highlight
+  // (rebuilding the sidebar costs tens of ms with hundreds of remote branches).
+  if (prev.size > 1 || S.sbSel.size > 1) return renderSidebar();
+  $('#sidebar').querySelectorAll('.sb-item[data-kind="local"]').forEach((el) => el.classList.toggle('sel', S.sbSel.has(el.dataset.name)));
 }
 
 $('#sidebar').addEventListener('click', (e) => {
@@ -1437,10 +1441,13 @@ function fileRow(f, mode, actions = '') {
  * shows only when the folder is actually clipped (CSS ellipsis in RTL boxes overlaps the text).
  */
 function markCutPaths() {
-  $('#detail').querySelectorAll('.f-row .p').forEach((p) => {
+  // Measure every row before marking any: interleaving the two re-lays out the list per row.
+  const ps = [...$('#detail').querySelectorAll('.f-row .p')];
+  const cut = ps.map((p) => {
     const d = p.querySelector('.dir');
-    p.classList.toggle('cut', d.scrollWidth > d.clientWidth + 1);
+    return d.scrollWidth > d.clientWidth + 1;
   });
+  ps.forEach((p, i) => p.classList.toggle('cut', cut[i]));
 }
 new ResizeObserver(() => markCutPaths()).observe($('#detail'));
 
