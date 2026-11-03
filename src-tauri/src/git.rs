@@ -13,16 +13,73 @@ const RS: char = '\u{1e}'; // record separator
 
 pub type R<T> = Result<T, String>;
 
+/// The git to run: the first of Homebrew's and Apple's that runs natively on this Mac. An Intel
+/// Homebrew left in /usr/local on Apple silicon runs under Rosetta, 2–3× slower per call.
 pub fn git_bin() -> &'static str {
     static BIN: OnceLock<String> = OnceLock::new();
     BIN.get_or_init(|| {
-        for c in ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"] {
-            if Path::new(c).exists() {
-                return c.to_string();
-            }
-        }
-        "git".to_string()
+        let found: Vec<&str> =
+            ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"].into_iter().filter(|c| Path::new(c).exists()).collect();
+        found.iter().find(|c| runs_natively(c)).or(found.first()).map_or("git".into(), |c| c.to_string())
     })
+}
+
+/// Does this Mach-O executable (thin or universal) contain code for the CPU we run on?
+/// Anything that isn't Mach-O counts as native.
+fn runs_natively(path: &str) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 512];
+    let n = std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)).unwrap_or(0);
+    if n < 8 {
+        return false;
+    }
+    const CPU_ARM64: u32 = 0x0100_000c;
+    const CPU_X86_64: u32 = 0x0100_0007;
+    let want = if cfg!(target_arch = "aarch64") { CPU_ARM64 } else { CPU_X86_64 };
+    let be = |o: usize| u32::from_be_bytes(buf[o..o + 4].try_into().unwrap());
+    let le = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+    match be(0) {
+        // Universal binary: a big-endian list of architectures, 20 (or 32 for the 64-bit form) bytes each.
+        magic @ (0xcafe_babe | 0xcafe_babf) => {
+            let size = if magic == 0xcafe_babe { 20 } else { 32 };
+            (0..be(4) as usize).map(|i| 8 + i * size).take_while(|o| o + 4 <= n).any(|o| be(o) == want)
+        }
+        _ if le(0) == 0xfeed_facf => le(4) == want,
+        _ => true,
+    }
+}
+
+/// ssh options that let consecutive git commands share one connection per key and server
+/// (ControlMaster). A new connection to GitHub costs 1.5–2.5 s; a shared one almost nothing.
+/// Idle connections close after two minutes, dead ones (network change) within ~30 s.
+/// Empty when the socket folder can't be made safely.
+pub fn ssh_mux(key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let Some(dir) = DIR.get_or_init(mux_dir) else { return String::new() };
+    // %C hashes user, host and port but not the key: a profile must never reuse a connection
+    // that another profile's key opened, so the key gets its own socket name too.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    format!(
+        " -o ControlMaster=auto -o ControlPath={}/{:08x}-%C -o ControlPersist=120 -o ServerAliveInterval=15 -o ServerAliveCountMax=2",
+        dir.display(),
+        h.finish() as u32
+    )
+}
+
+/// /tmp/gittygit-<uid>: socket paths are limited to 104 bytes, too short for $TMPDIR plus %C.
+/// Created private (0700), and reused only while it's still ours and private.
+fn mux_dir() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let uid = unsafe { libc::getuid() };
+    let dir = std::path::PathBuf::from(format!("/tmp/gittygit-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return None,
+        _ => {}
+    }
+    let m = std::fs::symlink_metadata(&dir).ok()?;
+    (m.is_dir() && m.uid() == uid && m.permissions().mode() & 0o077 == 0).then_some(dir)
 }
 
 /// GUI apps launched from Finder get a minimal PATH; hooks and credential
@@ -86,7 +143,7 @@ pub fn spawn(cwd: &str, args: &[&str], ctx: &Ctx, env: &[(&str, &str)], stdin: O
             cmd.env("GIT_SSH_COMMAND", ssh);
         }
         None if std::env::var_os("GIT_SSH_COMMAND").is_none() => {
-            cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+            cmd.env("GIT_SSH_COMMAND", format!("ssh -o BatchMode=yes{}", ssh_mux("")));
         }
         None => {}
     }
@@ -185,9 +242,9 @@ pub fn head(repo: &str) -> (Option<String>, Option<String>) {
 /// Whether git's commit-graph file exists (single file or split chain). It makes `--topo-order`
 /// over all branches, `log -- <path>` and blame much faster on big repositories.
 pub fn has_commit_graph(repo: &str) -> bool {
-    ["objects/info/commit-graph", "objects/info/commit-graphs/commit-graph-chain"].iter().any(|p| {
-        run(repo, &["rev-parse", "--git-path", p]).map(|g| Path::new(repo).join(g.trim()).is_file()).unwrap_or(false)
-    })
+    const FILES: [&str; 2] = ["objects/info/commit-graph", "objects/info/commit-graphs/commit-graph-chain"];
+    let out = run(repo, &["rev-parse", "--git-path", FILES[0], "--git-path", FILES[1]]).unwrap_or_default();
+    out.lines().any(|g| Path::new(repo).join(g.trim()).is_file())
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -234,16 +291,19 @@ pub fn search(repo: &str, query: &str, max: usize) -> R<Vec<SearchHit>> {
 
 // ---------------------------------------------------------------- change detection
 
-/// Fingerprint of everything the commit graph depends on: every ref (stash included) and HEAD.
-/// The working tree's own changes don't affect it, so most file saves leave it unchanged.
-pub fn graph_key(repo: &str, dirty: bool) -> R<String> {
+/// Every ref and the commit it points at (branches, remotes, tags, stash, notes…).
+pub fn all_refs(repo: &str) -> R<String> {
+    run(repo, &["for-each-ref", "--format=%(objectname) %(refname)"])
+}
+
+/// Fingerprint of everything the commit graph depends on: `all_refs`, `head` and whether the
+/// WIP row is shown. The working tree's own changes don't affect it, so most file saves leave
+/// it unchanged.
+pub fn key_of(refs: &str, head: &(Option<String>, Option<String>), dirty: bool) -> String {
     use std::hash::{Hash, Hasher};
-    let refs = run(repo, &["for-each-ref", "--format=%(objectname) %(refname)"])?;
-    let head = run(repo, &["rev-parse", "-q", "--verify", "--symbolic-full-name", "HEAD"]).unwrap_or_default();
-    let sha = run(repo, &["rev-parse", "-q", "--verify", "HEAD"]).unwrap_or_default();
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (refs, head, sha, dirty).hash(&mut h);
-    Ok(format!("{:016x}", h.finish()))
+    (refs, head, dirty).hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 // ---------------------------------------------------------------- status
@@ -1350,8 +1410,11 @@ mod tests {
         r
     }
 
-    fn rand_suffix() -> u128 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    /// Unique per call: parallel tests can read the same clock value.
+    fn rand_suffix() -> String {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{}-{n}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
     }
 
     fn commit(r: &str, file: &str, text: &str, msg: &str) -> String {
@@ -1421,7 +1484,43 @@ mod tests {
     }
 
     #[test]
+    fn native_binary_detection() {
+        let dir = std::env::temp_dir().join(format!("gittygit-macho-{}", rand_suffix()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let thin = |cpu: u32| [0xfeed_facf_u32.to_le_bytes(), cpu.to_le_bytes(), [0; 4]].concat();
+        let (ours, other) = if cfg!(target_arch = "aarch64") { (0x0100_000c, 0x0100_0007) } else { (0x0100_0007, 0x0100_000c) };
+        let write = |name: &str, bytes: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        assert!(runs_natively(&write("ours", &thin(ours))));
+        assert!(!runs_natively(&write("other", &thin(other))));
+        let fat = |cpus: &[u32]| {
+            let mut b = [0xcafe_babe_u32.to_be_bytes(), (cpus.len() as u32).to_be_bytes()].concat();
+            for c in cpus {
+                b.extend(c.to_be_bytes());
+                b.extend([0; 16]);
+            }
+            b
+        };
+        assert!(runs_natively(&write("universal", &fat(&[other, ours]))));
+        assert!(!runs_natively(&write("fat-other", &fat(&[other]))));
+        assert!(runs_natively(&write("script", b"#!/bin/sh\nexec git \"$@\"\n")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ssh_connections_are_shared_per_key() {
+        let (a, b) = (ssh_mux("/k/work"), ssh_mux("/k/personal"));
+        assert!(a.contains("ControlMaster=auto") && a.contains("-%C "), "{a}");
+        assert_ne!(a, b, "two keys must not share a connection");
+        assert_eq!(a, ssh_mux("/k/work"));
+    }
+
+    #[test]
     fn graph_key_tracks_refs_not_edits() {
+        let graph_key = |r: &str, dirty: bool| all_refs(r).map(|refs| key_of(&refs, &head(r), dirty));
         let r = repo();
         commit(&r, "f", "1\n", "A");
         let k1 = graph_key(&r, false).unwrap();

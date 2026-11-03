@@ -1,6 +1,9 @@
 //! Working-tree watcher.
 //! Changes are batched and surfaced to the UI as a single `repo-changed` event.
 //!
+//! Each event carries when its batch's last change was seen, so the UI can skip it when a
+//! refresh that started later already covered it.
+//!
 //! A batch ends after 400 ms without events, or 1.5 s after it started so a long stream of
 //! writes (a build, `npm install`) still refreshes regularly. Batches whose working-tree paths
 //! are all ignored by git (`git check-ignore`, so nested .gitignore files, info/exclude and the
@@ -59,8 +62,14 @@ pub fn relevant(root: &Path, paths: &HashSet<PathBuf>) -> bool {
     }
 }
 
-/// Watch `root` and call `on_change` once per relevant batch of changes.
-pub fn watch(root: PathBuf, on_change: impl Fn() + Send + 'static) -> notify::Result<RepoWatcher> {
+/// Milliseconds since the Unix epoch (the clock the UI's `Date.now()` uses).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Watch `root` and call `on_change` once per relevant batch of changes, with the time (ms since
+/// the epoch) the batch's last change arrived.
+pub fn watch(root: PathBuf, on_change: impl Fn(u64) + Send + 'static) -> notify::Result<RepoWatcher> {
     let (tx, rx) = channel::<Vec<PathBuf>>();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
@@ -74,6 +83,7 @@ pub fn watch(root: PathBuf, on_change: impl Fn() + Send + 'static) -> notify::Re
         while let Ok(first) = rx.recv() {
             let start = Instant::now();
             let mut batch: HashSet<PathBuf> = first.into_iter().collect();
+            let mut last = now_ms();
             loop {
                 let left = MAX_WAIT.saturating_sub(start.elapsed());
                 if left.is_zero() {
@@ -81,6 +91,7 @@ pub fn watch(root: PathBuf, on_change: impl Fn() + Send + 'static) -> notify::Re
                 }
                 match rx.recv_timeout(QUIET.min(left)) {
                     Ok(paths) => {
+                        last = now_ms();
                         if batch.len() <= MAX_PATHS {
                             batch.extend(paths);
                         }
@@ -90,7 +101,7 @@ pub fn watch(root: PathBuf, on_change: impl Fn() + Send + 'static) -> notify::Re
                 }
             }
             if relevant(&root, &batch) {
-                on_change();
+                on_change(last);
             }
         }
     });
@@ -99,8 +110,8 @@ pub fn watch(root: PathBuf, on_change: impl Fn() + Send + 'static) -> notify::Re
 
 pub fn start(app: AppHandle, root: PathBuf) -> notify::Result<RepoWatcher> {
     let name = root.to_string_lossy().to_string();
-    watch(root, move || {
-        let _ = app.emit("repo-changed", name.clone());
+    watch(root, move |at| {
+        let _ = app.emit("repo-changed", serde_json::json!({ "repo": name, "at": at }));
     })
 }
 
@@ -141,7 +152,7 @@ mod tests {
         let root = repo();
         let hits = Arc::new(Mutex::new(vec![]));
         let h = hits.clone();
-        let _w = watch(root.clone(), move || h.lock().unwrap().push(Instant::now())).unwrap();
+        let _w = watch(root.clone(), move |_| h.lock().unwrap().push(Instant::now())).unwrap();
         std::thread::sleep(Duration::from_millis(500));
         // Ignored writes alone: no refresh.
         for i in 0..5 {

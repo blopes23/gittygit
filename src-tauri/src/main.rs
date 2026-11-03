@@ -155,26 +155,23 @@ fn init_repo(path: String) -> R<()> {
     git::run(&path, &["init"]).map(|_| ())
 }
 
-#[tauri::command(async)]
-fn get_graph(repo: String, limit: Option<usize>) -> R<GraphPayload> {
-    let st = git::status(&repo)?;
-    let dirty = is_dirty(&st, &git::repo_state(&repo));
-    build_graph(&repo, limit.unwrap_or(5000), dirty)
-}
-
 /// A merge/rebase in progress keeps the WIP row so it can be continued or aborted,
 /// even when resolving left the working tree identical to HEAD.
 fn is_dirty(st: &git::Status, op: &git::RepoState) -> bool {
     !(st.staged.is_empty() && st.unstaged.is_empty() && st.conflicted.is_empty()) || op.kind.is_some()
 }
 
-fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
+fn build_graph(repo: &str, limit: usize, dirty: bool, head: (Option<String>, Option<String>)) -> R<GraphPayload> {
     let started = std::time::Instant::now();
-    // One extra commit tells whether there is more history than `limit`.
-    let mut commits = git::log(repo, limit + 1)?;
+    let (log, commit_graph) = std::thread::scope(|s| {
+        let cg = s.spawn(|| git::has_commit_graph(repo));
+        // One extra commit tells whether there is more history than `limit`.
+        (git::log(repo, limit + 1), cg.join().unwrap_or(false))
+    });
+    let mut commits = log?;
     let has_more = commits.len() > limit;
     commits.truncate(limit);
-    let (head_sha, head_branch) = git::head(repo);
+    let (head_sha, head_branch) = head;
     if dirty {
         // Synthetic work-in-progress node on top of HEAD (the "// WIP" row).
         commits.insert(
@@ -192,7 +189,6 @@ fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
     }
     let (rows, max_lanes) = graph::layout(commits);
     let load_ms = started.elapsed().as_millis() as u64;
-    let commit_graph = git::has_commit_graph(repo);
     Ok(GraphPayload { rows, max_lanes, head_sha, head_branch, dirty, has_more, load_ms, commit_graph })
 }
 
@@ -200,24 +196,51 @@ fn build_graph(repo: &str, limit: usize, dirty: bool) -> R<GraphPayload> {
 struct Snapshot {
     /// Identifies the graph below; pass it back as `known_key` to skip rebuilding an unchanged graph.
     key: String,
-    /// None when `known_key` still matches (the caller keeps its graph).
+    /// The same without HEAD; pass it back as `known_base`.
+    base: String,
+    /// None when `known_key` still matches (the caller keeps its graph), or when only HEAD moved.
     graph: Option<GraphPayload>,
+    /// Only HEAD changed since `known_base` (a checkout): the commits are the same, so the
+    /// caller can move its HEAD marker here instead of reloading history.
+    head_moved: Option<HeadMove>,
     status: git::Status,
     refs: git::Refs,
     op: git::RepoState,
 }
 
-/// Everything a refresh needs in one call. The commit graph (the expensive part: `git log` of
-/// thousands of commits plus layout) is only rebuilt when refs, HEAD or the WIP row changed.
+#[derive(Serialize)]
+struct HeadMove {
+    sha: Option<String>,
+    branch: Option<String>,
+}
+
+/// Everything a refresh needs in one call, with its git commands run side by side. The commit
+/// graph (the expensive part: `git log` of thousands of commits plus layout) is only rebuilt
+/// when refs, HEAD or the WIP row changed.
 #[tauri::command(async)]
-fn get_snapshot(repo: String, known_key: Option<String>, limit: Option<usize>) -> R<Snapshot> {
-    let status = git::status(&repo)?;
-    let op = git::repo_state(&repo);
-    let dirty = is_dirty(&status, &op);
+fn get_snapshot(repo: String, known_key: Option<String>, known_base: Option<String>, limit: Option<usize>) -> R<Snapshot> {
     let limit = limit.unwrap_or(5000).clamp(1, MAX_COMMITS);
-    let key = format!("{}-{limit}", git::graph_key(&repo, dirty)?);
-    let graph = if known_key.as_deref() == Some(key.as_str()) { None } else { Some(build_graph(&repo, limit, dirty)?) };
-    Ok(Snapshot { key, graph, status, refs: git::refs(&repo)?, op })
+    let (status, op, refs, all_refs, head) = std::thread::scope(|s| {
+        let status = s.spawn(|| git::status(&repo));
+        let op = s.spawn(|| git::repo_state(&repo));
+        let refs = s.spawn(|| git::refs(&repo));
+        let all = s.spawn(|| git::all_refs(&repo));
+        let head = git::head(&repo);
+        let join = "a snapshot thread panicked";
+        (status.join().expect(join), op.join().expect(join), refs.join().expect(join), all.join().expect(join), head)
+    });
+    let (status, refs, all_refs) = (status?, refs?, all_refs?);
+    let dirty = is_dirty(&status, &op);
+    let key = format!("{}-{limit}", git::key_of(&all_refs, &head, dirty));
+    let base = format!("{}-{limit}", git::key_of(&all_refs, &(None, None), dirty));
+    let (graph, head_moved) = if known_key.as_deref() == Some(key.as_str()) {
+        (None, None)
+    } else if known_base.as_deref() == Some(base.as_str()) && head.1.is_some() {
+        (None, Some(HeadMove { sha: head.0, branch: head.1 }))
+    } else {
+        (Some(build_graph(&repo, limit, dirty, head)?), None)
+    };
+    Ok(Snapshot { key, base, graph, head_moved, status, refs, op })
 }
 
 /// Most commits the graph will load (search and scrolling raise the limit up to this).
@@ -556,11 +579,11 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "get_repo_state" => to_value(get_repo_state(repo)).unwrap(),
         "read_conflict" => to_value(read_conflict(repo, s("path"))?).unwrap(),
         "resolve_conflict" => json!(resolve_conflict(s("profile_id"), repo, s("path"), s("content"))?),
-        "get_graph" => to_value(get_graph(repo, None)?).unwrap(),
         "get_snapshot" => {
             let known = Some(s("known_key")).filter(|k| !k.is_empty());
+            let base = Some(s("known_base")).filter(|k| !k.is_empty());
             let limit = get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-            to_value(get_snapshot(repo, known, limit)?).unwrap()
+            to_value(get_snapshot(repo, known, base, limit)?).unwrap()
         }
         "search_commits" => to_value(search_commits(repo, s("query"))?).unwrap(),
         "write_commit_graph" => {
@@ -683,7 +706,6 @@ fn main() {
             set_terminal_config,
             add_key_to_keychain,
             clone_repo,
-            get_graph,
             get_snapshot,
             search_commits,
             write_commit_graph,

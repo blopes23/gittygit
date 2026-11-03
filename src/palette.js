@@ -39,7 +39,7 @@ function paletteCommands() {
     for (const b of S.refs?.branches || []) {
       if (b.name === cur) continue;
       add(`co:${b.name}`, `Checkout ${b.name}`, 'branch', () => checkoutLocal(b.name));
-      if (cur) add(`merge:${b.name}`, `Merge ${b.name} into ${cur}`, 'branch', () => git(['merge', b.name], `Merged ${b.name} into ${cur}`));
+      if (cur) add(`merge:${b.name}`, `Merge ${b.name} into ${cur}`, 'branch', () => mergeBranch(b.name));
       if (cur) add(`cmp:${b.name}`, `Compare ${b.name} with ${cur}`, 'branch', () => setCompare({ a: cur, b: b.name, labelA: cur, labelB: b.name }));
     }
     const locals = new Set((S.refs?.branches || []).map((b) => b.name));

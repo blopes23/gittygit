@@ -53,7 +53,9 @@ async function pull(mode = pullMode()) {
   if (!choice) return;
   const chosen = choice === 'alt' ? 'merge' : 'rebase';
   await setPullMode(chosen);
-  return pull(chosen);
+  // That pull already fetched: join the branches locally rather than fetching again.
+  const args = chosen === 'rebase' ? ['rebase'] : ['merge', '--no-edit', '@{upstream}'];
+  return moveHead(args, chosen === 'rebase' ? `Rebased ${b.name} onto ${b.upstream}` : `Merged ${b.upstream} into ${b.name}`);
 }
 
 function pullMenu(e) {
@@ -89,7 +91,7 @@ async function autoFetch(minAge) {
       await invoke('git_run', { profileId, repo, args: ['fetch', '--all', '--prune', '--quiet'] });
       AUTO.fails = 0;
       AUTO.error = null;
-      updateRemoteTags(repo);
+      updateRemoteTags(repo, TAGS_MAX_AGE);
       updatePRs(repo);
     } catch (e) {
       AUTO.fails++;
@@ -113,7 +115,7 @@ function fetchSucceeded(repo) {
   AUTO.fails = 0;
   AUTO.error = null;
   renderFetchState();
-  updateRemoteTags(repo);
+  updateRemoteTags(repo, TAGS_MAX_AGE);
   updatePRs(repo);
 }
 
@@ -128,15 +130,22 @@ function renderFetchState() {
 
 // ------------------------------------------------------------------ remote tags
 
+// Asking the server for its tags is a connection of its own, so after fetches and pulls it's
+// only repeated every 10 minutes; pushing or deleting a tag updates it right away.
+const TAGS_MAX_AGE = 10 * 60_000;
+const tagsCheckedAt = new Map();
+
 /** Which tags exist on the default remote, so local-only ones can be marked. */
-async function updateRemoteTags(repo) {
+async function updateRemoteTags(repo, maxAge = 0) {
   if (S.remoteTags.get(repo) === null) return; // already loading
+  if (maxAge && S.remoteTags.has(repo) && Date.now() - (tagsCheckedAt.get(repo) || 0) < maxAge) return;
   const remote = repo === S.repo ? defaultRemote() : null;
   if (!remote) return;
   S.remoteTags.set(repo, null);
   try {
     const tags = await invoke('remote_tags', { profileId: activeProfile().id, repo, remote });
     S.remoteTags.set(repo, new Set(tags));
+    tagsCheckedAt.set(repo, Date.now());
   } catch {
     S.remoteTags.delete(repo); // offline or no access: show no markers
   }

@@ -175,6 +175,7 @@ pub fn ssh_command(key: &str, batch: bool) -> String {
     }
     if batch {
         c.push_str(" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15");
+        c.push_str(&git::ssh_mux(key));
     }
     c
 }

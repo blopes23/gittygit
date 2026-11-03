@@ -15,6 +15,7 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"
+libc = "0.2"
 # Keychain storage for GitHub tokens (already in the tree via the updater's TLS stack).
 security-framework = "3"
 

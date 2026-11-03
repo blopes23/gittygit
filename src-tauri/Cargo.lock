@@ -1130,6 +1130,7 @@ dependencies = [
 name = "gittygit"
 version = "0.2.4"
 dependencies = [
+ "libc",
  "notify",
  "security-framework",
  "serde",

@@ -13,7 +13,10 @@ const shim = `window.__TAURI__ = {
     if (['reveal', 'watch_repo', 'add_key_to_keychain'].includes(cmd)) return null;
     const r = await fetch('/__invoke', { method: 'POST', body: JSON.stringify({ cmd, args }) }).then(r => r.json());
     if ('err' in r) throw r.err; return r.ok; } },
-  event: { listen: async () => () => {} } };`;
+  event: { listen: async (name, fn) => { (window.__listeners[name] ||= []).push(fn); return () => {}; } } };
+window.__listeners = {};
+// Tests can fake backend events, e.g. __emit('repo-changed', { repo, at: Date.now() }).
+window.__emit = (name, payload) => (window.__listeners[name] || []).forEach((fn) => fn({ payload }));`;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 http.createServer(async (req, res) => {
   if (req.url === '/__invoke') {

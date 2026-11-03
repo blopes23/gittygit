@@ -63,6 +63,8 @@ const S = {
   compare: null, // { a, b, labelA, labelB } while the detail panel shows a comparison
   flash: null, // commit briefly highlighted in the graph
   fetching: null, // promise of a running background fetch
+  snapAt: 0, // when the latest refresh started (Date.now())
+  changedAt: 0, // latest file change reported since, see scheduleRefresh()
   remoteTags: new Map(), // repo -> Set of tag names on its default remote (null while loading)
   prs: new Map(), // repo -> { slug, prs, authed } | { error } | null while loading (see github.js)
   extras: new Map(), // repo -> { submodules, lfs, worktrees } (see advanced.js)
@@ -135,8 +137,6 @@ function toast(msg, kind = '', action = null) {
 }
 
 async function busy(fn) {
-  // Don't run a command while a background fetch holds git's locks.
-  if (S.fetching) await S.fetching.catch(() => {});
   S.busy++;
   $('#spinner').hidden = false;
   document.querySelectorAll('.act').forEach((b) => (b.disabled = true));
@@ -146,9 +146,20 @@ async function busy(fn) {
     if (--S.busy === 0) {
       $('#spinner').hidden = true;
       document.querySelectorAll('.act').forEach((b) => (b.disabled = false));
+      // Files changed while the command ran and its own refresh didn't see them yet.
+      if (S.changedAt > S.snapAt) scheduleRefresh(S.changedAt);
     }
   }
 }
+
+/**
+ * Resolves once a background fetch (if any) has finished. Only commands that talk to a remote
+ * wait for it; local ones (checkout, merge, commit…) run alongside.
+ */
+const fetchDone = () => S.fetching?.catch(() => {});
+const NETWORK = new Set(['fetch', 'pull', 'push', 'submodule']);
+// git couldn't take a lock (a ref, packed-refs, the index) that a concurrent git holds.
+const LOCKED = /\.lock'?: File exists|cannot lock ref|Unable to create .*\.lock/i;
 
 /** Explain auth failures in terms of the active profile's SSH key. */
 function explainGitError(msg) {
@@ -169,8 +180,15 @@ function explainGitError(msg) {
 
 /** git_run for the active tab, executed with the active profile's SSH key and author. */
 async function gitRaw(args) {
+  if (NETWORK.has(args[0])) await fetchDone();
+  const run = () => invoke('git_run', { profileId: activeProfile().id, repo: S.repo, args });
   try {
-    return await invoke('git_run', { profileId: activeProfile().id, repo: S.repo, args });
+    return await run().catch(async (e) => {
+      // Collided with the background fetch: wait for it and try once more.
+      if (!S.fetching || !LOCKED.test(String(e))) throw e;
+      await fetchDone();
+      return run();
+    });
   } catch (e) {
     throw explainGitError(String(e));
   }
@@ -277,7 +295,11 @@ const revParse = async (rev) => (await gitRaw(['rev-parse', rev])).trim();
  * Run something that moves the current branch (reset, amend, rebase) and offer to move it back.
  * `undoMode` is the reset mode that reverses it; `snapshot` also brings back discarded changes.
  */
-async function moveHead(fn, okMsg, { undoMode = 'keep', snapshot = null } = {}) {
+function moveHead(fn, okMsg, opts) {
+  return busy(() => moveHeadNow(fn, okMsg, opts));
+}
+
+async function moveHeadNow(fn, okMsg, { undoMode = 'keep', snapshot = null } = {}) {
   let before, branch;
   try {
     before = await revParse('HEAD');
@@ -341,15 +363,28 @@ const currentBranch = () => S.refs?.branches.find((b) => b.current);
 
 // ------------------------------------------------------------------ repo lifecycle
 
-let refreshing = false;
-let refreshAgain = false;
-async function refresh() {
-  if (!S.repo) return;
-  if (refreshing) {
-    refreshAgain = true;
-    return;
+// One refresh runs at a time. Asking while one runs queues a single follow-up, and the promise
+// resolves when that one finishes, so `await refresh()` always shows the state after the call.
+// Quiet refreshes (file watcher, focus) skip redrawing when nothing changed.
+let refreshRun = null;
+let refreshNext = null;
+let refreshLoud = false;
+function refresh({ quiet = false } = {}) {
+  if (!quiet) refreshLoud = true;
+  if (!refreshRun) {
+    const q = !refreshLoud;
+    refreshLoud = false;
+    refreshRun = doRefresh(q).finally(() => (refreshRun = null));
+    return refreshRun;
   }
-  refreshing = true;
+  return (refreshNext ||= refreshRun.then(() => {
+    refreshNext = null;
+    return refresh({ quiet: true });
+  }));
+}
+
+async function doRefresh(quiet) {
+  if (!S.repo) return;
   try {
     const repo = S.repo;
     // The graph comes back only when refs, HEAD or the WIP row changed since `graphKey`.
@@ -358,15 +393,31 @@ async function refresh() {
       S.limitFor = repo;
       S.hits = null;
     }
-    const knownKey = S.graph && S.graphFor === repo ? S.graphKey : null;
-    const snap = await invoke('get_snapshot', { repo, knownKey, limit: S.limit });
+    const known = S.graph && S.graphFor === repo;
+    const snapshot = (useKnown) =>
+      invoke('get_snapshot', { repo, knownKey: useKnown ? S.graphKey : null, knownBase: useKnown ? S.graphBase : null, limit: S.limit });
+    S.snapAt = Date.now(); // file changes seen before this are in the snapshot
+    let snap = await snapshot(known);
     if (repo !== S.repo) return;
+    if (snap.head_moved && !moveHeadMarker(snap.head_moved)) {
+      snap = await snapshot(false);
+      if (repo !== S.repo) return;
+    }
     const { status, refs, op } = snap;
+    const sig = JSON.stringify([repo, status, refs, op]);
+    const same = !snap.graph && !snap.head_moved && sig === S.snapSig;
+    S.snapSig = sig;
+    S.graphKey = snap.key;
     if (snap.graph) {
       S.graph = snap.graph;
       S.rows = snap.graph.rows;
-      S.graphKey = snap.key;
+      S.graphBase = snap.base;
       S.graphFor = repo;
+    }
+    if (quiet && same) {
+      // Nothing git knows about changed, but an open file's content may have.
+      if (S.file && (S.file.mode === 'staged' || S.file.mode === 'unstaged')) showDiff(S.file, true);
+      return;
     }
     const graph = S.graph;
     S.status = status;
@@ -397,19 +448,35 @@ async function refresh() {
     renderBisectBar();
   } catch (e) {
     toast(String(e), 'err');
-  } finally {
-    refreshing = false;
-    if (refreshAgain) {
-      refreshAgain = false;
-      refresh();
-    }
   }
 }
 
+/**
+ * A checkout from one branch to another: the commits are the same, only HEAD moved, so move
+ * its marker instead of reloading history. False when that isn't safe (detached HEAD, the WIP
+ * row, or the commit isn't loaded); the caller then reloads.
+ */
+function moveHeadMarker({ sha, branch }) {
+  const g = S.graph;
+  const from = S.rows?.[S.index.get(g?.head_sha)];
+  const to = S.rows?.[S.index.get(sha)];
+  if (!g?.head_branch || g.dirty || !from || !to || !to.refs.includes(branch)) return false;
+  from.refs = from.refs.map((r) => (r.startsWith('HEAD -> ') ? r.slice(8) : r));
+  to.refs = to.refs.map((r) => (r === branch ? `HEAD -> ${branch}` : r));
+  g.head_sha = sha;
+  g.head_branch = branch;
+  return true;
+}
+
+// File changes reported by the watcher (or the window regaining focus) are refreshed after a
+// short pause, unless a refresh that started later already covers them. While a command runs
+// they wait: its own refresh follows, and busy() picks up anything that came after.
 let changeTimer;
-function scheduleRefresh() {
+function scheduleRefresh(at = Date.now()) {
+  S.changedAt = Math.max(S.changedAt || 0, at);
+  if (S.busy || at < (S.snapAt || 0)) return;
   clearTimeout(changeTimer);
-  changeTimer = setTimeout(refresh, 150);
+  changeTimer = setTimeout(() => !S.busy && S.changedAt > S.snapAt && refresh({ quiet: true }), 150);
 }
 
 // ------------------------------------------------------------------ commit-graph suggestion
@@ -441,11 +508,14 @@ $('#perf-hint').addEventListener('click', async (e) => {
   if (ok !== true) return;
   const before = S.graph.load_ms;
   try {
-    await busy(() => invoke('write_commit_graph', { profileId: activeProfile().id, repo: S.repo, keepUpdated: true }));
+    await busy(async () => {
+      await fetchDone();
+      return invoke('write_commit_graph', { profileId: activeProfile().id, repo: S.repo, keepUpdated: true });
+    });
   } catch (e) {
     return toast(explainGitError(String(e)), 'err');
   }
-  S.graphKey = null;
+  S.graphKey = S.graphBase = null;
   await busy(refresh);
   toast(`History now loads in ${S.graph.load_ms} ms (was ${before} ms)`, 'ok');
 });
@@ -730,6 +800,12 @@ async function deleteRemoteBranch(name, remote, branch) {
 async function confirmRun(msg, args, okMsg) {
   if (await ask(msg, { ok: 'Continue', danger: true })) await git(args, okMsg);
 }
+/** Merge a branch into the current one; Undo puts the current branch back where it was. */
+function mergeBranch(name) {
+  const cur = currentBranch()?.name || 'HEAD';
+  return moveHead(['merge', name], (moved) => (moved ? `Merged ${name} into ${cur}` : `${cur} already contains ${name}`));
+}
+
 function checkoutLocal(name) {
   if (currentBranch()?.name === name) return;
   return git(['switch', name], `Checked out ${name}`);
@@ -764,7 +840,7 @@ function refMenu(kind, name, sha) {
     const branch = remote ? name.slice(remote.length + 1) : name;
     return [
       [`Checkout ${branch}`, () => checkoutRemote(name)],
-      cur && [`Merge ${name} into ${cur}`, () => git(['merge', name], `Merged ${name}`)],
+      cur && [`Merge ${name} into ${cur}`, () => mergeBranch(name)],
       cur && [`Compare ${name} with ${cur}`, () => setCompare({ a: cur, b: name, labelA: cur, labelB: name })],
       cur && [`Rebase ${cur} onto ${name}`, () => moveHead(['rebase', name], `Rebased ${cur} onto ${name}`)],
       null,
@@ -779,7 +855,7 @@ function refMenu(kind, name, sha) {
   return [
     !isCur && [`Checkout ${name}`, () => checkoutLocal(name)],
     canFF && [`Pull ${br.upstream} into ${name} (fast-forward)${br.behind ? `  ↓${br.behind}` : ''}`, () => fastForward([br])],
-    !isCur && cur && [`Merge ${name} into ${cur}`, () => git(['merge', name], `Merged ${name} into ${cur}`)],
+    !isCur && cur && [`Merge ${name} into ${cur}`, () => mergeBranch(name)],
     !isCur && cur && [`Compare ${name} with ${cur}`, () => setCompare({ a: cur, b: name, labelA: cur, labelB: name })],
     !isCur && cur && [`Rebase ${cur} onto ${name}`, () => moveHead(['rebase', name], `Rebased ${cur} onto ${name}`)],
     isCur && ['Push', () => ACTIONS.push()],
@@ -871,7 +947,10 @@ async function fastForward(branches) {
   const list = branches.map((b) => ({ name: b.name, remote: b.upstream_remote, remote_ref: b.upstream_ref }));
   let res;
   try {
-    res = await busy(() => invoke('fast_forward', { profileId: activeProfile().id, repo: S.repo, branches: list }));
+    res = await busy(async () => {
+      await fetchDone();
+      return invoke('fast_forward', { profileId: activeProfile().id, repo: S.repo, branches: list });
+    });
   } catch (e) {
     return toast(explainGitError(String(e)), 'err');
   }
@@ -1066,7 +1145,7 @@ function renderRows(force = true) {
 
 /** Scrolled to the end of the loaded history: load the next page. */
 async function loadMore() {
-  if (S.loadingMore || refreshing || !S.graph?.has_more || S.limit >= MAX_COMMITS) return;
+  if (S.loadingMore || refreshRun || !S.graph?.has_more || S.limit >= MAX_COMMITS) return;
   S.loadingMore = true;
   S.limit = Math.min(S.limit + PAGE, MAX_COMMITS);
   try {
@@ -1158,7 +1237,7 @@ $('#graph-rows').addEventListener('contextmenu', (e) => {
   const merge = r.parents.length > 1 ? ['-m', '1'] : [];
   const branchItems = parseRefs(r)
     .filter((p) => p.kind === 'local' && p.name !== currentBranch()?.name)
-    .flatMap((p) => [[`Checkout ${p.name}`, () => checkoutLocal(p.name)], [`Merge ${p.name} into ${cur}`, () => git(['merge', p.name], `Merged ${p.name}`)]]);
+    .flatMap((p) => [[`Checkout ${p.name}`, () => checkoutLocal(p.name)], [`Merge ${p.name} into ${cur}`, () => mergeBranch(p.name)]]);
   showMenu(e, [
     ...branchItems,
     branchItems.length ? null : false,
@@ -2030,7 +2109,7 @@ window.addEventListener('focus', () => {
 });
 
 listen('repo-changed', (ev) => {
-  if (ev.payload === S.repo) scheduleRefresh();
+  if (ev.payload.repo === S.repo) scheduleRefresh(ev.payload.at);
 });
 
 hydrateIcons();
