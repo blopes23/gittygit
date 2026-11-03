@@ -2,7 +2,7 @@
   "name": "gittygit",
   "private": true,
   "license": "MIT",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
