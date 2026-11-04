@@ -47,6 +47,8 @@ const S = {
   selected: null,
   file: null, // file whose diff is open
   commitCache: new Map(),
+  branch: null, // the sidebar branch whose tip is selected: { ref, name, sha, view: 'branch' | 'commit' }
+  branchCache: new Map(), // `${graphKey}|${ref}` → branch_changes result
   matches: [],
   matchSet: new Set(),
   matchPos: -1,
@@ -54,6 +56,7 @@ const S = {
   sbClosed: new Set(load('gg.sbClosed', [])),
   sbSel: new Set(), // multi-selected local branch names
   sbAnchor: null, // anchor for shift-click ranges
+  sbFilter: '', // sidebar filter text
   busy: 0,
   lineSel: new Set(), // picked diff lines ("hunk:line")
   lineAnchor: null,
@@ -625,6 +628,8 @@ $('[data-act="pull"]').addEventListener('contextmenu', (e) => {
 
 // ------------------------------------------------------------------ sidebar
 
+let sidebarHtml = '';
+
 function renderSidebar() {
   const r = S.refs;
   if (!r) return;
@@ -652,7 +657,7 @@ function renderSidebar() {
     (groups[remote] ||= []).push(rb);
   }
   const remotes = Object.entries(groups)
-    .map(([remote, list]) => `<div class="sb-group">${icon('cloud')} ${esc(remote)}</div>` + list.map((rb) => item('remote', rb.name, rb.sha, 'branch')).join(''))
+    .map(([remote, list]) => `<div class="sb-grp"><div class="sb-group">${icon('cloud')} ${esc(remote)}</div>` + list.map((rb) => item('remote', rb.name, rb.sha, 'branch')).join('') + '</div>')
     .join('');
 
   const onRemote = S.remoteTags.get(S.repo);
@@ -667,7 +672,7 @@ function renderSidebar() {
     ? `<div class="sb-selbar"><span>${n} selected</span><span class="spacer"></span>
         ${deletable ? `<button class="mini danger" data-sel="delete">Delete ${deletable}</button>` : ''}<button class="mini" data-sel="clear">Clear</button></div>`
     : '';
-  $('#sidebar').innerHTML =
+  const html =
     selbar +
     section('local', 'Local', r.branches.length, local || empty('No branches')) +
     section('remote', 'Remote', r.remotes.length, remotes || empty('No remotes')) +
@@ -675,14 +680,62 @@ function renderSidebar() {
     extrasSections(section, empty) +
     section('tags', 'Tags', r.tags.length, tags || empty('No tags')) +
     section('stashes', 'Stashes', r.stashes.length, stashes || empty('No stashes'));
+  // Refreshes mostly bring the same branches; rebuilding hundreds of rows for nothing is slow.
+  const list = $('#sb-list');
+  if (html === sidebarHtml) return;
+  list.innerHTML = sidebarHtml = html;
 
-  $('#sidebar').querySelectorAll('details').forEach((d) =>
+  list.querySelectorAll('details').forEach((d) =>
     d.addEventListener('toggle', () => {
+      if (S.sbFilter) return; // opened to show matches, not by the user
       d.open ? S.sbClosed.delete(d.dataset.key) : S.sbClosed.add(d.dataset.key);
       save('gg.sbClosed', [...S.sbClosed]);
     }),
   );
+  filterSidebar();
 }
+
+// Remote branches start folded (once, also for existing setups); the filter finds them.
+if (!load('gg.sbRemoteFolded', false)) {
+  S.sbClosed.add('remote');
+  save('gg.sbClosed', [...S.sbClosed]);
+  save('gg.sbRemoteFolded', true);
+}
+
+/** Show only the sidebar rows matching the filter, opening the sections that have matches. */
+function filterSidebar() {
+  const q = S.sbFilter.trim().toLowerCase();
+  const list = $('#sb-list');
+  for (const it of list.querySelectorAll('.sb-item')) it.hidden = !!q && !it.dataset.name.toLowerCase().includes(q);
+  for (const g of list.querySelectorAll('.sb-grp')) g.hidden = !!q && !g.querySelector('.sb-item:not([hidden])');
+  for (const e of list.querySelectorAll('.sb-empty')) e.hidden = !!q;
+  for (const d of list.querySelectorAll('details.sb-section')) {
+    const any = !!d.querySelector('.sb-item:not([hidden])');
+    d.hidden = !!q && !any;
+    d.open = q ? any : !S.sbClosed.has(d.dataset.key);
+  }
+  let none = $('.sb-nomatch', list);
+  if (q && !list.querySelector('.sb-item:not([hidden])')) {
+    if (!none) list.insertAdjacentHTML('beforeend', '<div class="sb-empty sb-nomatch">No matching branches</div>');
+  } else none?.remove();
+}
+
+$('#sb-filter').addEventListener('input', (e) => {
+  S.sbFilter = e.target.value;
+  filterSidebar();
+});
+$('#sb-filter').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    if (e.target.value) {
+      e.target.value = S.sbFilter = '';
+      filterSidebar();
+    } else e.target.blur();
+  } else if (e.key === 'Enter') {
+    // Jump to the first match, as if it was clicked.
+    $('#sb-list').querySelector('.sb-item:not([hidden])')?.click();
+  }
+});
 
 function setBranchSelection(names, anchor = S.sbAnchor) {
   const prev = S.sbSel;
@@ -691,7 +744,7 @@ function setBranchSelection(names, anchor = S.sbAnchor) {
   // The "N selected" bar only exists for multiple branches; otherwise just move the highlight
   // (rebuilding the sidebar costs tens of ms with hundreds of remote branches).
   if (prev.size > 1 || S.sbSel.size > 1) return renderSidebar();
-  $('#sidebar').querySelectorAll('.sb-item[data-kind="local"]').forEach((el) => el.classList.toggle('sel', S.sbSel.has(el.dataset.name)));
+  $('#sb-list').querySelectorAll('.sb-item[data-kind="local"]').forEach((el) => el.classList.toggle('sel', S.sbSel.has(el.dataset.name)));
 }
 
 $('#sidebar').addEventListener('click', (e) => {
@@ -721,9 +774,11 @@ $('#sidebar').addEventListener('click', (e) => {
     return;
   }
   setBranchSelection(kind === 'local' ? [name] : [], kind === 'local' ? name : null);
-  jumpTo(it.dataset.sha);
+  const ref = kind === 'local' ? `refs/heads/${name}` : kind === 'remote' ? `refs/remotes/${name}` : null;
+  jumpTo(it.dataset.sha, ref && { ref, name });
 });
 $('#sidebar').addEventListener('keydown', (e) => {
+  if (e.target.closest('input')) return;
   if ((e.key === 'Backspace' || e.key === 'Delete') && S.sbSel.size) {
     e.preventDefault();
     deleteBranches([...S.sbSel]);
@@ -1174,9 +1229,10 @@ $('#graph-scroll').addEventListener(
 );
 new ResizeObserver(() => S.repo && renderRows()).observe($('#graph-scroll'));
 
-function select(sha, scroll = false) {
+function select(sha, scroll = false, branch = null) {
   if (!sha) return;
   S.selected = sha;
+  S.branch = branch && { ...branch, sha, view: 'branch' };
   S.multi.clear();
   S.compare = null;
   closeDiff();
@@ -1194,9 +1250,9 @@ function ensureVisible(i) {
   else if (top + ROW_H > sc.scrollTop + sc.clientHeight) sc.scrollTop = top - sc.clientHeight + ROW_H * 3;
 }
 
-function jumpTo(sha) {
+function jumpTo(sha, branch = null) {
   if (!S.index.has(sha)) return toast('Commit is outside the loaded history');
-  select(sha, true);
+  select(sha, true, branch);
 }
 
 $('#graph-rows').addEventListener('click', (e) => {
@@ -1459,6 +1515,7 @@ function renderDetail() {
   if (S.compare) return renderCompare();
   if (S.multi.size > 1) return renderMulti();
   if (S.selected === 'WIP') renderWip();
+  else if (S.branch?.sha === S.selected && S.branch.view === 'branch') renderBranch();
   else renderCommit(S.selected);
 }
 
@@ -1614,8 +1671,9 @@ $('#detail').addEventListener('click', (e) => {
   if (row && row.dataset.mode === 'conflict') return openConflict(row.dataset.path, row.dataset.xy);
   if (row) {
     const mode = row.dataset.mode;
-    const sha = mode === 'commit' ? S.selected : mode === 'range' ? S.compare.a : null;
-    showDiff({ path: row.dataset.path, mode, sha, sha2: mode === 'range' ? S.compare.b : null, untracked: row.dataset.status === '?' });
+    const [a, b] = mode !== 'range' ? [] : S.compare ? [S.compare.a, S.compare.b] : [S.branch.fork, S.branch.sha];
+    const sha = mode === 'commit' ? S.selected : mode === 'range' ? a : null;
+    showDiff({ path: row.dataset.path, mode, sha, sha2: mode === 'range' ? b : null, untracked: row.dataset.status === '?' });
   }
 });
 $('#detail').addEventListener('dblclick', (e) => {
@@ -1654,6 +1712,7 @@ async function renderCommit(sha) {
       ${body ? `<div class="body">${esc(body)}</div>` : ''}
       <div class="d-meta">${avatar(c.author, c.email)}<div class="who"><b>${esc(c.author)}</b><small title="${fmtFull(c.time)}">authored ${fmtDate(c.time)} · ${esc(c.email)}</small>${committed}</div></div>
       ${signatureHtml(c)}
+      ${S.branch?.sha === sha && !S.branch.mainline ? `<div class="b-switch"><span>Latest commit of ${esc(S.branch.name)}</span><a data-bview="branch">Show all branch changes</a></div>` : ''}
     </div>
     <div class="d-scroll">
       <div class="f-section-h">${c.files.length} changed file${c.files.length === 1 ? '' : 's'}${c.parents.length > 1 ? ' <small>(vs first parent)</small>' : ''}</div>
@@ -1661,6 +1720,54 @@ async function renderCommit(sha) {
     </div>`;
   markCutPaths();
 }
+
+/**
+ * A sidebar branch's own changes since it left its mainline (like its pull request), so a
+ * merge of development into it doesn't show development's work as the branch's.
+ */
+async function renderBranch() {
+  const b = S.branch;
+  const key = `${S.repo}|${S.graphKey}|${b.ref}`;
+  let res = S.branchCache.get(key);
+  if (!res) {
+    try {
+      res = await invoke('branch_changes', { repo: S.repo, refname: b.ref });
+    } catch {
+      res = { base: null };
+    }
+    if (S.branchCache.size > 100) S.branchCache.clear();
+    S.branchCache.set(key, res);
+  }
+  if (S.branch !== b || S.selected !== b.sha) return;
+  // A mainline itself, or a branch with nothing left of its own: the plain commit view.
+  if (!res.base) {
+    b.view = 'commit';
+    b.mainline = true;
+    return renderCommit(b.sha);
+  }
+  b.fork = res.fork;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const behind = res.behind ? `, ${plural(res.behind, 'commit')} behind` : '';
+  $('#detail').innerHTML = `
+    <div class="d-head">
+      <div class="sha-line"><span>branch</span><span>since it left <code>${esc(res.base)}</code></span></div>
+      <h2>${esc(b.name)}</h2>
+      <div class="b-switch"><span>${plural(res.ahead, 'commit')} ahead of ${esc(res.base)}${behind}</span><a data-bview="commit">Show latest commit only</a></div>
+    </div>
+    <div class="d-scroll">
+      <div class="f-section-h">${plural(res.files.length, 'changed file')} on this branch</div>
+      ${res.files.map((f) => fileRow(f, 'range')).join('') || '<div class="f-empty">No file changes</div>'}
+    </div>`;
+  markCutPaths();
+}
+
+$('#detail').addEventListener('click', (e) => {
+  const v = e.target.closest('[data-bview]');
+  if (!v || !S.branch) return;
+  S.branch.view = v.dataset.bview;
+  closeDiff();
+  renderDetail();
+});
 
 // ------------------------------------------------------------------ diff view
 
@@ -2030,7 +2137,7 @@ $('#detail').addEventListener('contextmenu', (e) => {
   if (!row) return;
   e.preventDefault();
   const { path, mode, status } = row.dataset;
-  const sha = mode === 'commit' ? S.selected : null;
+  const sha = mode === 'commit' ? S.selected : mode === 'range' && !S.compare ? S.branch?.sha : null;
   const isNew = status === '?' || (mode === 'staged' && status === 'A');
   showMenu(e, [
     !isNew && status !== 'D' && ['Blame', () => openFileView({ mode: 'blame', path, rev: sha })],

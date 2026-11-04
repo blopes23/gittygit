@@ -599,6 +599,79 @@ pub fn compare(repo: &str, a: &str, b: Option<&str>) -> R<Compare> {
     })
 }
 
+#[derive(Serialize)]
+pub struct BranchChanges {
+    /// The branch this one is measured against (e.g. "origin/development"); None when no
+    /// mainline branch fits (the branch is one itself, or is already fully merged).
+    pub base: Option<String>,
+    /// Where the branch left `base` (their merge base); the changes are measured from here.
+    pub fork: String,
+    pub ahead: u32,
+    pub behind: u32,
+    pub files: Vec<FileChange>,
+}
+
+const MAINLINES: [&str; 6] = ["main", "master", "development", "develop", "dev", "trunk"];
+
+/// What a branch changes on its own: the diff from where it left the closest mainline branch
+/// (like a pull request shows it), so merging that mainline back in doesn't count as its work.
+pub fn branch_changes(repo: &str, refname: &str) -> R<BranchChanges> {
+    let none = || BranchChanges { base: None, fork: String::new(), ahead: 0, behind: 0, files: vec![] };
+    let short = |r: &str| r.strip_prefix("refs/heads/").or_else(|| r.strip_prefix("refs/remotes/")).unwrap_or(r).to_string();
+    // "origin/x" and "x" are the same branch for picking a base.
+    let tail = |r: &str| match r.strip_prefix("refs/remotes/") {
+        Some(rest) => rest.split_once('/').map_or(rest, |(_, t)| t).to_string(),
+        None => short(r),
+    };
+    if !refname.starts_with("refs/heads/") && !refname.starts_with("refs/remotes/") {
+        return Err(format!("{refname} is not a branch"));
+    }
+    let tip = commit_rev(repo, refname)?;
+    let name = tail(refname);
+    if MAINLINES.contains(&name.as_str()) {
+        return Ok(none());
+    }
+    let mut patterns: Vec<String> = vec![];
+    for m in MAINLINES {
+        patterns.push(format!("refs/heads/{m}"));
+        patterns.push(format!("refs/remotes/*/{m}"));
+    }
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(patterns.iter().map(String::as_str));
+    // Remote branches first: with the same fork point they're the shared, up-to-date name.
+    let mut cands: Vec<String> = run(repo, &args)?.lines().map(String::from).collect();
+    cands.sort_by_key(|r| !r.starts_with("refs/remotes/"));
+
+    let forks: Vec<(String, String)> = std::thread::scope(|sc| {
+        let jobs: Vec<_> = cands.iter().map(|c| (c, sc.spawn(|| run(repo, &["merge-base", c, &tip]).ok()))).collect();
+        jobs.into_iter()
+            .filter_map(|(c, j)| Some((c.clone(), j.join().ok()??.trim().to_string())))
+            // The tip already being on the mainline means there's nothing of its own left.
+            .filter(|(_, fork)| !fork.is_empty() && *fork != tip)
+            .collect()
+    });
+    if forks.is_empty() {
+        return Ok(none());
+    }
+    // The closest mainline is the one the branch left most recently.
+    let mut args = vec!["log", "--no-walk=unsorted", "--format=%H %ct"];
+    args.extend(forks.iter().map(|(_, f)| f.as_str()));
+    let times: std::collections::HashMap<String, i64> = run(repo, &args)?
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(h, t)| (h.to_string(), t.parse().unwrap_or(0))))
+        .collect();
+    let time = |f: &String| times.get(f).copied().unwrap_or(0);
+    let best = forks.iter().map(|(_, f)| time(f)).max().unwrap_or(0);
+    // The first of equally close candidates, so a remote branch wins over its local copy.
+    let (base, fork) = forks.iter().find(|(_, f)| time(f) == best).cloned().unwrap();
+
+    let counts = run(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{tip}")])?;
+    let mut n = counts.split_whitespace().map(|x| x.parse().unwrap_or(0));
+    let (behind, ahead) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
+    let files = parse_name_status(&run(repo, &["diff", "--name-status", "-z", "-M", &fork, &tip])?);
+    Ok(BranchChanges { base: Some(short(&base)), fork, ahead, behind, files })
+}
+
 // ---------------------------------------------------------------- submodules, LFS, worktrees
 
 #[derive(Serialize, Debug)]
@@ -1480,6 +1553,34 @@ mod tests {
         assert!(run(&r, &["diff", "--cached", "--", "f"]).unwrap().contains("+changed"));
         apply_patch(&r, &patch, "unstage", &Ctx::default()).unwrap();
         assert!(run(&r, &["diff", "--cached"]).unwrap().is_empty());
+        std::fs::remove_dir_all(&r).unwrap();
+    }
+
+    #[test]
+    fn branch_changes_ignore_merged_in_mainline_work() {
+        let r = repo();
+        commit(&r, "base", "0\n", "base");
+        run(&r, &["branch", "development"]).unwrap();
+        run(&r, &["switch", "-q", "-c", "feature"]).unwrap();
+        commit(&r, "mine", "1\n", "feature work");
+        run(&r, &["switch", "-q", "development"]).unwrap();
+        commit(&r, "theirs1", "x\n", "dev 1");
+        commit(&r, "theirs2", "y\n", "dev 2");
+        run(&r, &["switch", "-q", "feature"]).unwrap();
+        run(&r, &["merge", "-q", "--no-edit", "development"]).unwrap();
+        run(&r, &["switch", "-q", "development"]).unwrap();
+        commit(&r, "theirs3", "z\n", "dev 3");
+
+        // development is closer than main (left later), and its merged-in files aren't the branch's.
+        let c = branch_changes(&r, "refs/heads/feature").unwrap();
+        assert_eq!(c.base.as_deref(), Some("development"));
+        assert_eq!(c.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["mine"]);
+        assert_eq!((c.ahead, c.behind), (2, 1));
+        // A mainline itself, and a branch with nothing of its own, have no base.
+        assert!(branch_changes(&r, "refs/heads/development").unwrap().base.is_none());
+        run(&r, &["branch", "merged", "main"]).unwrap();
+        assert!(branch_changes(&r, "refs/heads/merged").unwrap().base.is_none());
+        assert!(branch_changes(&r, "HEAD").is_err());
         std::fs::remove_dir_all(&r).unwrap();
     }
 

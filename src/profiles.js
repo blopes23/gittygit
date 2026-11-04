@@ -140,9 +140,11 @@ async function activateTab(i) {
   S.name = baseName(root);
   S.selected = view.selected || null;
   S.commitCache.clear();
+  S.branch = null;
   S.matches = [];
   S.matchSet = new Set();
   S.sbSel = new Set();
+  S.sbFilter = $('#sb-filter').value = '';
   $('#search').value = '';
   closeDiff();
   $('#detail').innerHTML = '';
@@ -641,6 +643,10 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     const p = activeProfile();
     if (S.repo) closeTab(p.tabs.indexOf(S.repo));
+  } else if (e.metaKey && e.shiftKey && e.code === 'KeyF' && S.repo) {
+    e.preventDefault();
+    $('#sb-filter').focus();
+    $('#sb-filter').select();
   } else if (e.metaKey && e.key === 'f' && S.repo) {
     e.preventDefault();
     $('#search').focus();

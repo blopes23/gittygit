@@ -42,7 +42,10 @@
   </nav>
 
   <main id="layout" hidden>
-    <aside id="sidebar" tabindex="0" title="⌘-click or ⇧-click to select several local branches"></aside>
+    <aside id="sidebar" tabindex="0">
+      <div class="sb-filter"><input id="sb-filter" type="search" placeholder="Filter branches ⌘⇧F" spellcheck="false" autocomplete="off"></div>
+      <div id="sb-list" title="⌘-click or ⇧-click to select several local branches"></div>
+    </aside>
     <div class="resizer" data-resize="sidebar"></div>
     <section id="center">
       <div id="perf-hint" hidden></div>

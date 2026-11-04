@@ -298,6 +298,12 @@ fn compare(repo: String, a: String, b: Option<String>) -> R<git::Compare> {
     git::compare(&repo, &a, b.as_deref())
 }
 
+/// A branch's own changes since it left its mainline (main, development, …).
+#[tauri::command(async)]
+fn branch_changes(repo: String, refname: String) -> R<git::BranchChanges> {
+    git::branch_changes(&repo, &refname)
+}
+
 /// Append a pattern to the repo's .gitignore; false when it was already there.
 #[tauri::command(async)]
 fn add_to_gitignore(profile_id: String, repo: String, pattern: String) -> R<bool> {
@@ -605,6 +611,7 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
             let b = Some(s("b")).filter(|x| !x.is_empty());
             to_value(compare(repo, s("a"), b)?).unwrap()
         }
+        "branch_changes" => to_value(branch_changes(repo, s("refname"))?).unwrap(),
         "add_to_gitignore" => json!(add_to_gitignore(s("profile_id"), repo, s("pattern"))?),
         "apply_patch" => json!(apply_patch(s("profile_id"), repo, s("patch"), s("mode"))?),
         "file_history" => to_value(file_history(repo, s("path"))?).unwrap(),
@@ -715,6 +722,7 @@ fn main() {
             get_commit,
             get_diff,
             compare,
+            branch_changes,
             add_to_gitignore,
             git_run,
             get_repo_state,
