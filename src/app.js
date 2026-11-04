@@ -629,6 +629,10 @@ $('[data-act="pull"]').addEventListener('contextmenu', (e) => {
 // ------------------------------------------------------------------ sidebar
 
 let sidebarHtml = '';
+// Drawn arrows: the ↑/↓ characters are hairline-thin at the sidebar's small size.
+const arrow = (d) => `<svg class="arr" viewBox="0 0 8 10" width="8" height="10"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const ARROW_UP = arrow('M4 9V1.5M1 4.5l3-3 3 3');
+const ARROW_DOWN = arrow('M4 1v7.5M1 5.5l3 3 3-3');
 
 function renderSidebar() {
   const r = S.refs;
@@ -645,7 +649,7 @@ function renderSidebar() {
   for (const n of S.sbSel) if (!names.has(n)) S.sbSel.delete(n);
   const local = r.branches
     .map((b) => {
-      const track = [b.ahead ? `↑${b.ahead}` : '', b.behind ? `↓${b.behind}` : ''].join(' ').trim();
+      const track = (b.ahead ? `<span>${ARROW_UP}${b.ahead}</span>` : '') + (b.behind ? `<span>${ARROW_DOWN}${b.behind}</span>` : '');
       const cls = [b.current && 'current', S.sbSel.has(b.name) && 'sel'].filter(Boolean).join(' ');
       return item('local', b.name, b.sha, b.current ? 'check' : 'branch', prBadge(b.name) + (track ? `<span class="track">${track}</span>` : ''), cls);
     })
