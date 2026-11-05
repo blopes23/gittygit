@@ -121,10 +121,11 @@ async function renderCompare() {
     </div>
     <div class="d-scroll">
       <div class="f-section-h">Changed files (${res.files.length})</div>
-      ${res.files.map((f) => fileRow(f, 'range')).join('') || '<div class="f-empty">No differences</div>'}
+      ${fileRows(res.files, 'range') || '<div class="f-empty">No differences</div>'}
       <div class="f-section-h">Only in ${esc(c.labelB)} (${cap(res.only_b)})</div>${commits(res.only_b)}
       <div class="f-section-h">Only in ${esc(c.labelA)} (${cap(res.only_a)})</div>${commits(res.only_a)}
     </div>`;
+  fileListDrawn();
 }
 
 $('#detail').addEventListener('click', (e) => {

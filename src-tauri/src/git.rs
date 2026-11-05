@@ -604,6 +604,8 @@ pub struct BranchChanges {
     /// The branch this one is measured against (e.g. "origin/development"); None when no
     /// mainline branch fits (the branch is one itself, or is already fully merged).
     pub base: Option<String>,
+    /// The mainline that already contains every commit of the branch, if any.
+    pub merged_into: Option<String>,
     /// Where the branch left `base` (their merge base); the changes are measured from here.
     pub fork: String,
     pub ahead: u32,
@@ -616,7 +618,7 @@ const MAINLINES: [&str; 6] = ["main", "master", "development", "develop", "dev",
 /// What a branch changes on its own: the diff from where it left the closest mainline branch
 /// (like a pull request shows it), so merging that mainline back in doesn't count as its work.
 pub fn branch_changes(repo: &str, refname: &str) -> R<BranchChanges> {
-    let none = || BranchChanges { base: None, fork: String::new(), ahead: 0, behind: 0, files: vec![] };
+    let none = || BranchChanges { base: None, merged_into: None, fork: String::new(), ahead: 0, behind: 0, files: vec![] };
     let short = |r: &str| r.strip_prefix("refs/heads/").or_else(|| r.strip_prefix("refs/remotes/")).unwrap_or(r).to_string();
     // "origin/x" and "x" are the same branch for picking a base.
     let tail = |r: &str| match r.strip_prefix("refs/remotes/") {
@@ -646,10 +648,14 @@ pub fn branch_changes(repo: &str, refname: &str) -> R<BranchChanges> {
         let jobs: Vec<_> = cands.iter().map(|c| (c, sc.spawn(|| run(repo, &["merge-base", c, &tip]).ok()))).collect();
         jobs.into_iter()
             .filter_map(|(c, j)| Some((c.clone(), j.join().ok()??.trim().to_string())))
-            // The tip already being on the mainline means there's nothing of its own left.
-            .filter(|(_, fork)| !fork.is_empty() && *fork != tip)
+            .filter(|(_, fork)| !fork.is_empty())
             .collect()
     });
+    // Already merged into a mainline: nothing of its own left. Measuring it against another,
+    // older mainline instead would list that mainline's whole history as the branch's work.
+    if let Some((c, _)) = forks.iter().find(|(_, fork)| *fork == tip) {
+        return Ok(BranchChanges { merged_into: Some(short(c)), ..none() });
+    }
     if forks.is_empty() {
         return Ok(none());
     }
@@ -669,7 +675,7 @@ pub fn branch_changes(repo: &str, refname: &str) -> R<BranchChanges> {
     let mut n = counts.split_whitespace().map(|x| x.parse().unwrap_or(0));
     let (behind, ahead) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
     let files = parse_name_status(&run(repo, &["diff", "--name-status", "-z", "-M", &fork, &tip])?);
-    Ok(BranchChanges { base: Some(short(&base)), fork, ahead, behind, files })
+    Ok(BranchChanges { base: Some(short(&base)), merged_into: None, fork, ahead, behind, files })
 }
 
 // ---------------------------------------------------------------- submodules, LFS, worktrees
@@ -1579,7 +1585,14 @@ mod tests {
         // A mainline itself, and a branch with nothing of its own, have no base.
         assert!(branch_changes(&r, "refs/heads/development").unwrap().base.is_none());
         run(&r, &["branch", "merged", "main"]).unwrap();
-        assert!(branch_changes(&r, "refs/heads/merged").unwrap().base.is_none());
+        let merged = branch_changes(&r, "refs/heads/merged").unwrap();
+        assert!(merged.base.is_none());
+        assert_eq!(merged.merged_into.as_deref(), Some("development"));
+        // Once merged into development, a stale main must not become its base.
+        run(&r, &["switch", "-q", "development"]).unwrap();
+        run(&r, &["merge", "-q", "--no-edit", "feature"]).unwrap();
+        let done = branch_changes(&r, "refs/heads/feature").unwrap();
+        assert_eq!((done.base, done.merged_into.as_deref()), (None, Some("development")));
         assert!(branch_changes(&r, "HEAD").is_err());
         std::fs::remove_dir_all(&r).unwrap();
     }

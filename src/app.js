@@ -1500,6 +1500,50 @@ function fileRow(f, mode, actions = '') {
  * File rows keep the file name whole and clip the folder path from the left; a separate "…"
  * shows only when the folder is actually clipped (CSS ellipsis in RTL boxes overlaps the text).
  */
+const FILE_CHUNK = 300; // file rows drawn at once; the rest follow as the list scrolls
+const moreFiles = new Map(); // "more files" placeholder id → { files, mode, actions } still to draw
+let moreSeq = 0;
+
+/**
+ * File rows for a list, drawing only the first FILE_CHUNK: a list of thousands (a big merge,
+ * a vendored folder) would otherwise block the window while every row is laid out.
+ */
+function fileRows(files, mode, actions = '') {
+  const html = files.slice(0, FILE_CHUNK).map((f) => fileRow(f, mode, actions)).join('');
+  if (files.length <= FILE_CHUNK) return html;
+  const id = ++moreSeq;
+  moreFiles.set(id, { files: files.slice(FILE_CHUNK), mode, actions });
+  // Clickable too: scrolling past it in one jump (dragging the scrollbar) doesn't trigger it.
+  return html + `<div class="f-more" data-more="${id}"><a>Show ${(files.length - FILE_CHUNK).toLocaleString()} more files</a></div>`;
+}
+
+const moreObserver = new IntersectionObserver((entries) => entries.forEach((e) => e.isIntersecting && showMoreFiles(e.target)), { rootMargin: '600px' });
+
+function showMoreFiles(el) {
+  moreObserver.unobserve(el);
+  const rest = moreFiles.get(+el.dataset.more);
+  moreFiles.delete(+el.dataset.more);
+  if (rest) el.insertAdjacentHTML('beforebegin', fileRows(rest.files, rest.mode, rest.actions));
+  el.remove();
+  fileListDrawn();
+}
+
+$('#detail').addEventListener('click', (e) => {
+  const more = e.target.closest('.f-more');
+  if (more) showMoreFiles(more);
+});
+
+/** After drawing file rows: mark clipped paths and load further rows when they come close. */
+function fileListDrawn() {
+  markCutPaths();
+  const live = new Set();
+  for (const el of $('#detail').querySelectorAll('.f-more')) {
+    live.add(+el.dataset.more);
+    moreObserver.observe(el);
+  }
+  for (const id of moreFiles.keys()) if (!live.has(id)) moreFiles.delete(id);
+}
+
 function markCutPaths() {
   // Measure every row before marking any: interleaving the two re-lays out the list per row.
   const ps = [...$('#detail').querySelectorAll('.f-row .p')];
@@ -1577,14 +1621,14 @@ function renderWip() {
   let html = opBannerHtml();
   if (st.conflicted.length) {
     html += `<div class="f-section-h conflicts">Conflicts (${st.conflicted.length})<span class="spacer"></span><small>click a file to resolve</small></div>` +
-      st.conflicted.map((f) => fileRow(f, 'conflict')).join('');
+      fileRows(st.conflicted, 'conflict');
   }
   html += `<div class="f-section-h">Unstaged Files (${st.unstaged.length})<span class="spacer"></span>${st.unstaged.length ? '<button class="mini" data-do="stage-all">Stage all</button>' : ''}</div>`;
-  html += st.unstaged.length ? st.unstaged.map((f) => fileRow(f, 'unstaged', stageBtn + discardBtn)).join('') : '<div class="f-empty">No unstaged changes</div>';
+  html += st.unstaged.length ? fileRows(st.unstaged, 'unstaged', stageBtn + discardBtn) : '<div class="f-empty">No unstaged changes</div>';
   html += `<div class="f-section-h">Staged Files (${st.staged.length})<span class="spacer"></span>${st.staged.length ? '<button class="mini" data-do="unstage-all">Unstage all</button>' : ''}</div>`;
-  html += st.staged.length ? st.staged.map((f) => fileRow(f, 'staged', unstageBtn)).join('') : '<div class="f-empty">No staged changes</div>';
+  html += st.staged.length ? fileRows(st.staged, 'staged', unstageBtn) : '<div class="f-empty">No staged changes</div>';
   $('#wip-files').innerHTML = html;
-  markCutPaths();
+  fileListDrawn();
   // Rebase/cherry-pick/revert commit through Continue; a manual commit would add an extra one.
   const op = S.op?.kind;
   $('.commit-box').style.display = op && op !== 'merge' ? 'none' : '';
@@ -1716,13 +1760,15 @@ async function renderCommit(sha) {
       ${body ? `<div class="body">${esc(body)}</div>` : ''}
       <div class="d-meta">${avatar(c.author, c.email)}<div class="who"><b>${esc(c.author)}</b><small title="${fmtFull(c.time)}">authored ${fmtDate(c.time)} · ${esc(c.email)}</small>${committed}</div></div>
       ${signatureHtml(c)}
-      ${S.branch?.sha === sha && !S.branch.mainline ? `<div class="b-switch"><span>Latest commit of ${esc(S.branch.name)}</span><a data-bview="branch">Show all branch changes</a></div>` : ''}
+      ${S.branch?.sha !== sha ? ''
+        : S.branch.mergedInto ? `<div class="b-switch"><span>Everything on ${esc(S.branch.name)} is already in ${esc(S.branch.mergedInto)}; showing its latest commit</span></div>`
+        : !S.branch.mainline ? `<div class="b-switch"><span>Latest commit of ${esc(S.branch.name)}</span><a data-bview="branch">Show all branch changes</a></div>` : ''}
     </div>
     <div class="d-scroll">
       <div class="f-section-h">${c.files.length} changed file${c.files.length === 1 ? '' : 's'}${c.parents.length > 1 ? ' <small>(vs first parent)</small>' : ''}</div>
-      ${c.files.map((f) => fileRow(f, 'commit')).join('') || '<div class="f-empty">No file changes</div>'}
+      ${fileRows(c.files, 'commit') || '<div class="f-empty">No file changes</div>'}
     </div>`;
-  markCutPaths();
+  fileListDrawn();
 }
 
 /**
@@ -1747,6 +1793,7 @@ async function renderBranch() {
   if (!res.base) {
     b.view = 'commit';
     b.mainline = true;
+    b.mergedInto = res.merged_into;
     return renderCommit(b.sha);
   }
   b.fork = res.fork;
@@ -1760,9 +1807,9 @@ async function renderBranch() {
     </div>
     <div class="d-scroll">
       <div class="f-section-h">${plural(res.files.length, 'changed file')} on this branch</div>
-      ${res.files.map((f) => fileRow(f, 'range')).join('') || '<div class="f-empty">No file changes</div>'}
+      ${fileRows(res.files, 'range') || '<div class="f-empty">No file changes</div>'}
     </div>`;
-  markCutPaths();
+  fileListDrawn();
 }
 
 $('#detail').addEventListener('click', (e) => {

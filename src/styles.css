@@ -213,6 +213,8 @@ input, textarea { font: inherit; color: var(--text); }
 .d-meta .who small { color: var(--text-dim); }
 .sha-line { font-family: var(--mono); font-size: 11px; color: var(--text-dim); display: flex; gap: 10px; flex-wrap: wrap; }
 .sha-line a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.f-more { padding: 6px 14px; font-size: 12px; }
+.f-more a { color: var(--accent); cursor: pointer; }
 .b-switch { margin-top: 8px; font-size: 12px; color: var(--text-dim); display: flex; flex-wrap: wrap; column-gap: 10px; }
 .b-switch a { color: var(--accent); cursor: pointer; }
 .b-switch a:hover { text-decoration: underline; }

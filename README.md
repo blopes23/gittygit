@@ -12,7 +12,8 @@ A fast, native-feeling Git client for macOS (Apple silicon and Intel), built wit
   - stored in `~/Library/Application Support/dev.gittygit.desktop/profiles.json` (key paths only, never key contents)
 - Commit graph of all branches (lane layout in Rust, virtualized rows, branch/tag pills, WIP node); older history loads in pages of 5000 as you scroll; the graph column fits the lanes on screen (drag its header edge to set a width, double-click to reset) and narrow windows hide the Author column
 - Sidebar: local / remote branches with ahead/behind, tags, stashes; filter them by name (⌘⇧F, ↵ opens the first match)
-- Clicking a branch shows its own changes since it left main / development (like its pull request), so merging development into it doesn't count as its work; one click switches to just the latest commit
+- Clicking a branch shows its own changes since it left main / development (like its pull request), so merging development into it doesn't count as its work; one click switches to just the latest commit. Branches already merged into one say so
+- Long file lists (thousands of changed files) draw the first 300 rows and add more as you scroll
 - Pull into a branch without checking it out (right-click → "Pull … (fast-forward)", works on multi-selection too)
 - Multi-select local branches (⌘-click, ⇧-click, ⌘A) and delete them in one go (⌫ or right-click); unmerged ones get a single force-delete prompt
 - Working tree: stage / unstage / discard per file or all, commit, amend
