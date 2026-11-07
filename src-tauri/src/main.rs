@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod git;
 mod github;
 mod graph;
@@ -296,6 +297,37 @@ fn get_diff(repo: String, path: String, mode: String, sha: Option<String>, sha2:
 #[tauri::command(async)]
 fn compare(repo: String, a: String, b: Option<String>) -> R<git::Compare> {
     git::compare(&repo, &a, b.as_deref())
+}
+
+/// Ollama models available at `url` (Settings → AI writing).
+#[tauri::command(async)]
+fn ai_models(url: String) -> R<Vec<String>> {
+    ai::models(&url)
+}
+
+/// What the model reads to draft a commit message for the staged changes.
+#[tauri::command(async)]
+fn ai_commit_context(repo: String) -> R<String> {
+    ai::commit_context(&repo)
+}
+
+/// What the model reads to draft a pull request from `branch` into `base`.
+#[tauri::command(async)]
+fn ai_pr_context(repo: String, branch: String, base: String) -> R<String> {
+    ai::pr_context(&repo, &branch, &base)
+}
+
+/// Runs a prompt on the local model, emitting `ai-text` with each piece as it's written.
+#[tauri::command(async)]
+fn ai_generate(app: AppHandle, url: String, model: String, prompt: String) -> R<String> {
+    ai::generate(&url, &model, &prompt, |piece| {
+        let _ = app.emit("ai-text", piece);
+    })
+}
+
+#[tauri::command]
+fn ai_stop() {
+    ai::stop();
 }
 
 /// A branch's own changes since it left its mainline (main, development, …).
@@ -612,6 +644,10 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
             to_value(compare(repo, s("a"), b)?).unwrap()
         }
         "branch_changes" => to_value(branch_changes(repo, s("refname"))?).unwrap(),
+        "ai_models" => json!(ai_models(s("url"))?),
+        "ai_commit_context" => json!(ai_commit_context(repo)?),
+        "ai_pr_context" => json!(ai_pr_context(repo, s("branch"), s("base"))?),
+        "ai_generate" => json!(ai::generate(&s("url"), &s("model"), &s("prompt"), |_| {})?),
         "add_to_gitignore" => json!(add_to_gitignore(s("profile_id"), repo, s("pattern"))?),
         "apply_patch" => json!(apply_patch(s("profile_id"), repo, s("patch"), s("mode"))?),
         "file_history" => to_value(file_history(repo, s("path"))?).unwrap(),
@@ -723,6 +759,11 @@ fn main() {
             get_diff,
             compare,
             branch_changes,
+            ai_models,
+            ai_commit_context,
+            ai_pr_context,
+            ai_generate,
+            ai_stop,
             add_to_gitignore,
             git_run,
             get_repo_state,

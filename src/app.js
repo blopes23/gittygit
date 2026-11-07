@@ -1580,7 +1580,7 @@ function renderWip() {
       <div class="commit-box">
         <div class="summary-wrap"><input id="c-summary" placeholder="Commit summary" spellcheck="true"><span class="count" id="c-count"></span></div>
         <textarea id="c-body" placeholder="Description (optional)"></textarea>
-        <label><input type="checkbox" id="c-amend"> Amend previous commit</label>
+        <div class="c-row"><label><input type="checkbox" id="c-amend"> Amend previous commit</label><button class="mini" id="c-ai" type="button" hidden></button></div>
         <button class="primary" id="c-go">Commit</button>
       </div></div>`;
     const sum = $('#c-summary'), body = $('#c-body'), amend = $('#c-amend');
@@ -1645,6 +1645,7 @@ function renderWip() {
 function updateCommitButton() {
   const btn = $('#c-go');
   if (!btn) return;
+  window.aiCommitButton?.();
   const n = S.status?.staged.length || 0;
   const len = draft.summary.length;
   const count = $('#c-count');

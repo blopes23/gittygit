@@ -95,7 +95,9 @@ async function createPR(br) {
   const remoteBranch = branch.upstream_ref.replace(/^refs\/heads\//, '');
   const base = await invoke('default_branch', { repo: S.repo, remote: branch.upstream_remote }).catch(() => 'main');
   if (remoteBranch === base) return toast(`${branch.name} is the default branch; create the pull request from a feature branch.`, 'err');
-  openUrl(`https://github.com/${d.slug}/compare/${encodeURI(base)}...${encodeURI(remoteBranch)}?expand=1`);
+  const compareUrl = `https://github.com/${d.slug}/compare/${encodeURI(base)}...${encodeURI(remoteBranch)}?expand=1`;
+  if (AI.ready) return aiPullRequest({ compareUrl, remoteRef: `${branch.upstream_remote}/${remoteBranch}`, baseRef: `${branch.upstream_remote}/${base}` });
+  openUrl(compareUrl);
 }
 
 /** Check out a PR: its branch if it's ours, else fetch pull/N/head into pr/N. */

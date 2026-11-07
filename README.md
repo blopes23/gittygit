@@ -14,6 +14,7 @@ A fast, native-feeling Git client for macOS (Apple silicon and Intel), built wit
 - Sidebar: local / remote branches with ahead/behind, tags, stashes; filter them by name (⌘⇧F, ↵ opens the first match)
 - Clicking a branch shows its own changes since it left main / development (like its pull request), so merging development into it doesn't count as its work; one click switches to just the latest commit. Branches already merged into one say so
 - Long file lists (thousands of changed files) draw the first 300 rows and add more as you scroll
+- Optional AI writing with a local model through [Ollama](https://ollama.com) (Settings → AI writing, off by default): "Write with AI" drafts a commit message for the staged changes in the style of the repository's recent messages, and Create pull request drafts a title and description before opening GitHub. Big changes are trimmed to fit (file list, then an even share of each file's diff); nothing is sent anywhere but the Ollama address
 - Pull into a branch without checking it out (right-click → "Pull … (fast-forward)", works on multi-selection too)
 - Multi-select local branches (⌘-click, ⇧-click, ⌘A) and delete them in one go (⌫ or right-click); unmerged ones get a single force-delete prompt
 - Working tree: stage / unstage / discard per file or all, commit, amend

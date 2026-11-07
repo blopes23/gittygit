@@ -151,7 +151,26 @@
         <label class="st-check"><input type="checkbox" id="st-words"><span>Highlight the changed words in modified lines</span></label>
         <label class="st-check"><input type="checkbox" id="st-syntax"><span>Syntax colours</span></label>
       </div>
+      <div class="st-group">
+        <span class="st-label">AI writing (Ollama, on this Mac)</span>
+        <label class="st-check"><input type="checkbox" id="st-ai"><span>Offer to draft commit messages and pull request descriptions</span></label>
+        <div id="st-ai-fields" class="st-group" hidden>
+          <label class="fld">Model <select id="st-ai-model"></select></label>
+          <label class="fld">Ollama address <input id="st-ai-url" spellcheck="false" autocomplete="off"></label>
+          <small class="hint" id="st-ai-hint"></small>
+        </div>
+      </div>
       <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Save</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="ai-dlg">
+    <form method="dialog" class="st-form">
+      <h3>New pull request</h3>
+      <p class="hint" id="ai-status"></p>
+      <label class="fld">Title <input id="ai-pr-title" spellcheck="true" autocomplete="off"></label>
+      <label class="fld">Description <textarea id="ai-pr-body" rows="14" spellcheck="true"></textarea></label>
+      <menu><button value="cancel" class="ghost">Cancel</button><button value="copy" class="ghost">Copy</button><button value="ok" class="primary">Open on GitHub</button></menu>
     </form>
   </dialog>
 
@@ -225,6 +244,7 @@
   <script src="remote.js"></script>
   <script src="github.js"></script>
   <script src="advanced.js"></script>
+  <script src="ai.js"></script>
   <script src="settings.js"></script>
   <script src="recover.js"></script>
   <script src="palette.js"></script>

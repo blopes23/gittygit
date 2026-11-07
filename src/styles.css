@@ -268,6 +268,7 @@ input, textarea { font: inherit; color: var(--text); }
 .commit-box input:focus, .commit-box textarea:focus { border-color: var(--accent); }
 .commit-box textarea { height: 70px; }
 .commit-box label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 12px; }
+.commit-box .c-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .commit-box .summary-wrap { position: relative; }
 .commit-box .summary-wrap input { width: 100%; padding-right: 40px; }
 .commit-box .count { position: absolute; right: 8px; top: 8px; font-size: 11px; color: var(--text-faint); }
@@ -612,6 +613,10 @@ button:disabled { opacity: .45; }
   border: 1px solid color-mix(in srgb, var(--orange) 50%, transparent); border-radius: 3px; padding: 0 3px; line-height: 13px;
 }
 #ctx-menu .mi-label { padding: 5px 10px 2px; font-size: 11px; color: var(--text-faint); }
+#ai-dlg { width: min(640px, 94vw); padding: 0; background: var(--bg-2); color: var(--text); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
+#ai-dlg::backdrop { background: rgba(0, 0, 0, .45); }
+#ai-dlg textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; outline: none; resize: vertical; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+#ai-dlg textarea:focus { border-color: var(--accent); }
 #settings-dlg, #token-dlg {
   width: min(460px, 92vw); padding: 0; background: var(--bg-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 24px 60px rgba(0, 0, 0, .55);
@@ -641,6 +646,7 @@ button:disabled { opacity: .45; }
 .dl.del .wd { background: color-mix(in srgb, var(--red) 38%, transparent); border-radius: 2px; }
 .dl.add .wd { background: color-mix(in srgb, var(--green) 34%, transparent); border-radius: 2px; }
 .st-group { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.st-group[hidden] { display: none; }
 .st-group .st-label { font-size: 12px; color: var(--text-dim); }
 .st-form .st-check { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 12px; cursor: pointer; }
 .st-form .st-check input { flex: none; width: 14px; height: 14px; margin: 0; }

@@ -13,6 +13,7 @@ function openSettings() {
   $('#st-syntax').checked = diffPrefs.syntax;
   stDlg.dataset.resetPull = '';
   $('#st-reset-pull').textContent = `Clear per-repository choices (${Object.keys(st.repo_pull).length})`;
+  aiFillSettings();
   stDlg.returnValue = '';
   stDlg.showModal();
 }
@@ -34,6 +35,7 @@ stDlg.addEventListener('close', async () => {
   save('gg.diffWords', diffPrefs.words);
   save('gg.diffSyntax', diffPrefs.syntax);
   if (S.file && S.diffModel) showDiff(S.file, true);
+  aiSaveSettings();
   await mutateStore((st) => {
     st.settings.auto_fetch_minutes = mins;
     st.settings.pull_mode = mode;
