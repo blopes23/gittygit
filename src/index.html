@@ -233,9 +233,19 @@
         <pre id="pf-test-out" class="test-out"></pre>
         <small class="hint">Fetch, pull, push and clone use only this key (IdentitiesOnly), so ssh-agent can't pick another account.</small>
 
-        <h4>GitHub token <small class="hint">optional</small></h4>
-        <div class="line"><input id="pf-ghtoken" type="password" spellcheck="false" autocomplete="off" placeholder="ghp_… or github_pat_…"><button class="ghost" id="pf-ghclear">Remove</button></div>
-        <small class="hint">Shows pull requests and CI checks for private repositories (public ones work without it). Read-only access to pull requests and checks is enough. Stored in the macOS Keychain, not in Gittygit's settings.</small>
+        <h4>Accounts <small class="hint">optional · pull and merge requests</small></h4>
+        <div class="acct">
+          <div class="acct-h"><b>GitHub</b><span class="acct-state" id="gh-state"></span></div>
+          <div class="line"><input id="pf-ghtoken" type="password" spellcheck="false" autocomplete="off"><button class="ghost" id="pf-ghcheck">Check</button><button class="ghost" id="pf-ghclear">Remove</button></div>
+          <small class="hint">For private repositories, and to review or merge. <a href="#" data-link="https://github.com/settings/personal-access-tokens/new">Create a token</a> with <i>Pull requests: read and write</i> (and <i>Contents: read and write</i> to merge).</small>
+        </div>
+        <div class="acct">
+          <div class="acct-h"><b>GitLab</b><span class="acct-state" id="gl-state"></span></div>
+          <div class="line"><input id="pf-glhost" spellcheck="false" autocomplete="off" placeholder="gitlab.com" title="Your GitLab server, if it isn't gitlab.com"></div>
+          <div class="line"><input id="pf-gltoken" type="password" spellcheck="false" autocomplete="off"><button class="ghost" id="pf-glcheck">Check</button><button class="ghost" id="pf-glclear">Remove</button></div>
+          <small class="hint">For merge requests on gitlab.com or your own server (leave the server empty for gitlab.com). <a href="#" id="pf-glcreate">Create a token</a> with the <i>api</i> scope.</small>
+        </div>
+        <small class="hint">Tokens are kept in the macOS Keychain, not in Gittygit's settings.</small>
 
         <h4>Expected remote owners</h4>
         <textarea id="pf-owners" spellcheck="false" placeholder="github.com/acme-corp&#10;gitlab.company.io"></textarea>

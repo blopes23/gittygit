@@ -416,8 +416,9 @@ $('#recent-list').addEventListener('click', (e) => {
 
 // ------------------------------------------------------------------ profile editor
 
-// tokens: profile id -> { saved, next } where next is a new token, '' to remove, or null (unchanged).
-const ED = { draft: null, cur: null, keys: [], tokens: new Map() };
+// tokens / gl: profile id -> { saved, next, check } for its GitHub and GitLab token, where next is
+// a new token, '' to remove, or null (unchanged), and check the result of the Check button.
+const ED = { draft: null, cur: null, keys: [], tokens: new Map(), gl: new Map() };
 const dlg = $('#profiles-dlg');
 const newId = (name) => `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'profile'}-${Math.random().toString(36).slice(2, 6)}`;
 
@@ -426,7 +427,11 @@ async function openProfileEditor({ create = false } = {}) {
   ED.cur = S.store.active;
   ED.keys = await invoke('list_ssh_keys').catch(() => []);
   ED.tokens = new Map();
-  for (const p of ED.draft.profiles) ED.tokens.set(p.id, { saved: await invoke('has_github_token', { profileId: p.id }).catch(() => false), next: null });
+  ED.gl = new Map();
+  for (const p of ED.draft.profiles) {
+    ED.tokens.set(p.id, { saved: await invoke('has_github_token', { profileId: p.id }).catch(() => false), next: null });
+    ED.gl.set(p.id, { saved: await invoke('has_gitlab_token', { profileId: p.id, host: p.gitlab_host || '' }).catch(() => false), next: null });
+  }
   if (create) addDraftProfile();
   renderEditor();
   dlg.showModal();
@@ -443,12 +448,14 @@ function addDraftProfile() {
     git_name: '',
     git_email: '',
     remote_owners: [],
+    gitlab_host: '',
     tabs: [],
     active_tab: 0,
     terminal_repos: [],
   };
   ED.draft.profiles.push(p);
   ED.tokens.set(p.id, { saved: false, next: null });
+  ED.gl.set(p.id, { saved: false, next: null });
   ED.cur = p.id;
 }
 
@@ -482,10 +489,8 @@ function renderEditor() {
   $('#pf-test-out').textContent = '';
   $('#pf-test-out').className = 'test-out';
   $('#pf-owners').value = p.remote_owners.join('\n');
-  const tok = ED.tokens.get(p.id) || { saved: false, next: null };
-  $('#pf-ghtoken').value = tok.next || '';
-  $('#pf-ghtoken').placeholder = tok.next === '' ? 'Will be removed on Save' : tok.saved ? 'Saved in Keychain — type to replace' : 'ghp_… or github_pat_…';
-  $('#pf-ghclear').disabled = !tok.saved && !tok.next;
+  $('#pf-glhost').value = p.gitlab_host || '';
+  renderAccounts();
 
   $('#pf-repos').innerHTML = p.tabs.length
     ? p.tabs
@@ -527,14 +532,76 @@ $('#pf-colors').addEventListener('click', (e) => {
   draftProfile().color = b.dataset.color;
   renderEditor();
 });
-$('#pf-ghtoken').addEventListener('input', (e) => {
-  const tok = ED.tokens.get(ED.cur);
-  tok.next = e.target.value.trim() || null;
-  $('#pf-ghclear').disabled = !tok.saved && !tok.next;
+/** Token fields and their state line ("Saved", "Signed in as …", "Removed when you save"). */
+function renderAccounts() {
+  const show = (kind, tok, example) => {
+    const input = $(`#pf-${kind}token`), state = $(`#${kind}-state`);
+    input.value = tok.next || '';
+    input.placeholder = tok.saved && tok.next === null ? 'Saved — paste a new one to replace it' : `Paste a token (${example}…)`;
+    const [text, cls] = tok.check
+      ? tok.check
+      : tok.next === '' ? ['Removed when you save', 'warn']
+      : tok.next ? ['New · saved when you click Save', 'warn']
+      : tok.saved ? ['✓ Saved', 'ok']
+      : ['Not set', ''];
+    state.textContent = text;
+    state.className = `acct-state ${cls}`;
+    $(`#pf-${kind}clear`).disabled = !tok.saved && !tok.next;
+    $(`#pf-${kind}check`).disabled = !tok.saved && !tok.next;
+  };
+  show('gh', ED.tokens.get(ED.cur), 'github_pat_');
+  show('gl', ED.gl.get(ED.cur), 'glpat-');
+}
+
+for (const kind of ['gh', 'gl']) {
+  const tokens = () => (kind === 'gh' ? ED.tokens : ED.gl).get(ED.cur);
+  $(`#pf-${kind}token`).addEventListener('input', (e) => {
+    const tok = tokens();
+    tok.next = e.target.value.trim() || null;
+    tok.check = null;
+    const state = $(`#${kind}-state`);
+    state.textContent = tok.next ? 'New · saved when you click Save' : tok.saved ? '✓ Saved' : 'Not set';
+    state.className = `acct-state ${tok.next ? 'warn' : tok.saved ? 'ok' : ''}`;
+    $(`#pf-${kind}clear`).disabled = $(`#pf-${kind}check`).disabled = !tok.saved && !tok.next;
+  });
+  $(`#pf-${kind}clear`).addEventListener('click', () => {
+    const tok = tokens();
+    Object.assign(tok, { next: tok.saved ? '' : null, check: null });
+    renderAccounts();
+  });
+  $(`#pf-${kind}check`).addEventListener('click', async () => {
+    const tok = tokens();
+    tok.check = ['Checking…', ''];
+    renderAccounts();
+    try {
+      const who = await invoke('token_whoami', { profileId: ED.cur, forge: kind === 'gh' ? 'github' : 'gitlab', host: draftProfile().gitlab_host || '', token: tok.next || '' });
+      tok.check = [`✓ Signed in as ${who}`, 'ok'];
+    } catch (e) {
+      tok.check = [String(e), 'bad'];
+    }
+    renderAccounts();
+  });
+}
+$('#pf-glhost').addEventListener('change', async (e) => {
+  const p = draftProfile();
+  p.gitlab_host = e.target.value.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  e.target.value = p.gitlab_host;
+  // A token belongs to one server: show whether this one has a saved token.
+  const tok = ED.gl.get(p.id);
+  tok.saved = await invoke('has_gitlab_token', { profileId: p.id, host: p.gitlab_host }).catch(() => false);
+  tok.check = null;
+  renderAccounts();
 });
-$('#pf-ghclear').addEventListener('click', () => {
-  ED.tokens.get(ED.cur).next = '';
-  renderEditor();
+$('#pf-glcreate').addEventListener('click', (e) => {
+  e.preventDefault();
+  const host = draftProfile().gitlab_host || 'gitlab.com';
+  invoke('reveal', { repo: '', target: 'url', path: `https://${host}/-/user_settings/personal_access_tokens?name=Gittygit&scopes=api` }).catch((err) => toast(String(err), 'err'));
+});
+dlg.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-link]');
+  if (!a) return;
+  e.preventDefault();
+  invoke('reveal', { repo: '', target: 'url', path: a.dataset.link }).catch((err) => toast(String(err), 'err'));
 });
 $('#pf-key').addEventListener('change', (e) => {
   draftProfile().ssh_key = e.target.value;
@@ -608,11 +675,17 @@ $('#pf-save').addEventListener('click', async () => {
       if (gone && tok.saved) await invoke('set_github_token', { profileId: id, token: '' });
       else if (!gone && tok.next !== null) await invoke('set_github_token', { profileId: id, token: tok.next });
     }
+    for (const [id, tok] of ED.gl) {
+      const p = profileById(id, ED.draft) || profileById(id, S.store);
+      const host = p?.gitlab_host || '';
+      if (!profileById(id, ED.draft) && tok.saved) await invoke('set_gitlab_token', { profileId: id, host, token: '' });
+      else if (profileById(id, ED.draft) && tok.next !== null) await invoke('set_gitlab_token', { profileId: id, host, token: tok.next });
+    }
   } catch (e) {
     return toast(String(e), 'err');
   }
-  $('#pf-ghtoken').value = '';
-  if ([...ED.tokens.values()].some((t) => t.next !== null)) S.prs.clear();
+  $('#pf-ghtoken').value = $('#pf-gltoken').value = '';
+  S.prs.clear(); // tokens or the GitLab server may have changed
   dlg.close();
   toast('Profiles saved', 'ok');
   renderProfileChrome();

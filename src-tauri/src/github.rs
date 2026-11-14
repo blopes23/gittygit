@@ -1,13 +1,11 @@
-//! GitHub pull requests for the sidebar and branch badges.
+//! GitHub pull requests for the sidebar, branch badges and the pull request view.
 //!
-//! Requests go through macOS's own `curl` (no extra HTTP stack in the app); an optional
-//! per-profile token is read from the Keychain and handed to curl on stdin, never in argv.
+//! Requests go through macOS's own `curl` (forge.rs); an optional per-profile token is read
+//! from the Keychain and handed to curl on stdin, never in argv.
 //! Without a token, public repositories still work within GitHub's anonymous rate limit.
 
 use crate::git::{self, R};
 use serde::Serialize;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 const SERVICE: &str = "dev.gittygit.github";
 
@@ -33,41 +31,13 @@ pub fn slug(url: &str) -> Option<String> {
 
 // ---------------------------------------------------------------- token storage
 
-/// Tests and the dev bridge (GITTYGIT_CONFIG_DIR set) keep tokens in a file, not the Keychain.
-fn test_store() -> Option<std::path::PathBuf> {
-    std::env::var_os("GITTYGIT_CONFIG_DIR").map(|d| std::path::PathBuf::from(d).join("github-tokens.json"))
-}
-
 pub fn get_token(profile: &str) -> Option<String> {
-    if let Some(p) = test_store() {
-        let map: std::collections::HashMap<String, String> = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-        return map.get(profile).cloned();
-    }
-    security_framework::passwords::get_generic_password(SERVICE, profile).ok().and_then(|b| String::from_utf8(b).ok())
+    crate::forge::secret_get(SERVICE, profile)
 }
 
 /// Save (or with an empty token, remove) a profile's GitHub token.
 pub fn set_token(profile: &str, token: &str) -> R<()> {
-    let token = token.trim();
-    if token.contains(char::is_whitespace) {
-        return Err("a token can't contain spaces".into());
-    }
-    if let Some(p) = test_store() {
-        let mut map: std::collections::HashMap<String, String> =
-            std::fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        if token.is_empty() {
-            map.remove(profile);
-        } else {
-            map.insert(profile.into(), token.into());
-        }
-        return std::fs::write(p, serde_json::to_string(&map).unwrap()).map_err(|e| e.to_string());
-    }
-    use security_framework::passwords::{delete_generic_password, set_generic_password};
-    if token.is_empty() {
-        let _ = delete_generic_password(SERVICE, profile);
-        return Ok(());
-    }
-    set_generic_password(SERVICE, profile, token.as_bytes()).map_err(|e| format!("couldn't save to the Keychain: {e}"))
+    crate::forge::secret_set(SERVICE, profile, token)
 }
 
 // ---------------------------------------------------------------- API
@@ -77,54 +47,13 @@ fn api_get(path: &str, token: Option<&str>) -> R<(u16, String)> {
     api_send("GET", path, token, None)
 }
 
-/// Any api.github.com request. The token goes to curl on stdin with the headers; a JSON body
-/// (never secret) through a private temporary file.
+/// Any api.github.com request (the token travels with the headers on curl's stdin).
 fn api_send(method: &str, path: &str, token: Option<&str>, json: Option<&serde_json::Value>) -> R<(u16, String)> {
     let mut headers = String::from("Accept: application/vnd.github+json\nX-GitHub-Api-Version: 2022-11-28\nUser-Agent: Gittygit\n");
     if let Some(t) = token {
         headers.push_str(&format!("Authorization: Bearer {t}\n"));
     }
-    let url = format!("https://api.github.com{path}");
-    let body_file = match json {
-        Some(v) => {
-            use std::os::unix::fs::OpenOptionsExt;
-            static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let f = std::env::temp_dir().join(format!("gittygit-gh-{}-{n}.json", std::process::id()));
-            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&f).map_err(|e| e.to_string())?;
-            file.write_all(v.to_string().as_bytes()).map_err(|e| e.to_string())?;
-            headers.push_str("Content-Type: application/json\n");
-            Some(f)
-        }
-        None => None,
-    };
-    let data = body_file.as_ref().map(|f| format!("@{}", f.display()));
-    let mut args = vec!["-sS", "--max-time", "20", "-X", method, "-H", "@-", "-w", "\n%{http_code}"];
-    if let Some(d) = &data {
-        args.extend(["--data-binary", d.as_str()]);
-    }
-    args.push(&url);
-    let child = Command::new("/usr/bin/curl")
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("failed to run curl: {e}"));
-    let out = child.and_then(|mut child| {
-        child.stdin.take().expect("piped").write_all(headers.as_bytes()).map_err(|e| e.to_string())?;
-        child.wait_with_output().map_err(|e| e.to_string())
-    });
-    if let Some(f) = body_file {
-        let _ = std::fs::remove_file(f);
-    }
-    let out = out?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let (body, code) = text.rsplit_once('\n').ok_or("unexpected curl output")?;
-    Ok((code.trim().parse().unwrap_or(0), body.to_string()))
+    crate::forge::request(method, &format!("https://api.github.com{path}"), &headers, json)
 }
 
 #[derive(Serialize, Clone)]
@@ -148,6 +77,9 @@ pub struct PullRequests {
     pub slug: String,
     pub authed: bool,
     pub prs: Vec<PullRequest>,
+    /// "github" | "gitlab", and the host the web pages live on.
+    pub forge: String,
+    pub host: String,
 }
 
 fn s(v: &serde_json::Value, path: &[&str]) -> String {
@@ -213,7 +145,7 @@ pub fn pull_requests(repo: &str, remote: &str, profile: &str) -> R<PullRequests>
     for (p, h) in prs.iter_mut().zip(handles) {
         p.checks = h.join().ok().flatten();
     }
-    Ok(PullRequests { slug, authed: token.is_some(), prs })
+    Ok(PullRequests { slug, authed: token.is_some(), prs, forge: "github".into(), host: "github.com".into() })
 }
 
 // ---------------------------------------------------------------- one pull request
@@ -299,6 +231,10 @@ pub fn pr_detail(repo: &str, remote: &str, profile: &str, number: u64) -> R<serd
         .map(|(m, _)| *m)
         .collect();
     Ok(serde_json::json!({
+        "forge": "github",
+        "fetch_ref": format!("pull/{number}/head"),
+        "actions": ["approve", "request_changes", "comment", "merge", "close"],
+        "approved_by": [],
         "number": number,
         "title": p["title"],
         "body": p["body"],

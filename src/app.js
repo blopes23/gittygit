@@ -1753,7 +1753,8 @@ async function renderCommit(sha) {
     $('#detail').innerHTML = `<div class="f-empty">${esc(e)}</div>`;
     return;
   }
-  if (S.selected !== sha) return;
+  // A pull request or comparison opened while this commit was loading replaces it.
+  if (S.selected !== sha || S.pr || S.compare) return;
   const [summary, ...rest] = c.message.split('\n');
   const body = rest.join('\n').trim();
   const parents = c.parents.map((p) => `<a data-sha-link="${p}">${short(p)}</a>`).join(' ');
@@ -1795,7 +1796,7 @@ async function renderBranch() {
     if (S.branchCache.size > 100) S.branchCache.clear();
     S.branchCache.set(key, res);
   }
-  if (S.branch !== b || S.selected !== b.sha) return;
+  if (S.branch !== b || S.selected !== b.sha || S.pr) return;
   // A mainline itself, or a branch with nothing left of its own: the plain commit view.
   if (!res.base) {
     b.view = 'commit';

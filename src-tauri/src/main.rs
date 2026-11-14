@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ai;
+mod forge;
 mod git;
 mod github;
 mod graph;
@@ -534,23 +535,44 @@ fn default_branch(repo: String, remote: String) -> String {
 
 #[tauri::command(async)]
 fn pull_requests(profile_id: String, repo: String, remote: String) -> R<github::PullRequests> {
-    profiles::load().for_repo(&profile_id, &repo)?;
-    github::pull_requests(&repo, &remote, &profile_id)
+    let store = profiles::load();
+    let p = store.for_repo(&profile_id, &repo)?;
+    forge::pull_requests(&repo, &remote, &profile_id, &p.gitlab_host)
 }
 
 /// One pull request with its description, reviews, comments and checks.
 #[tauri::command(async)]
 fn pr_detail(profile_id: String, repo: String, remote: String, number: u64) -> R<serde_json::Value> {
-    profiles::load().for_repo(&profile_id, &repo)?;
-    github::pr_detail(&repo, &remote, &profile_id, number)
+    let store = profiles::load();
+    let p = store.for_repo(&profile_id, &repo)?;
+    forge::pr_detail(&repo, &remote, &profile_id, &p.gitlab_host, number)
 }
 
 /// Approve, request changes, comment on, merge or close a pull request.
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)]
 fn pr_action(profile_id: String, repo: String, remote: String, number: u64, action: String, body: String, method: String, delete_branch: bool) -> R<String> {
-    profiles::load().for_repo(&profile_id, &repo)?;
-    github::pr_action(&repo, &remote, &profile_id, number, &action, &body, &method, delete_branch)
+    let store = profiles::load();
+    let p = store.for_repo(&profile_id, &repo)?;
+    forge::pr_action(&repo, &remote, &profile_id, &p.gitlab_host, number, &action, &body, &method, delete_branch)
+}
+
+/// Whether a profile has a GitLab token for `host` (empty = gitlab.com).
+#[tauri::command]
+fn has_gitlab_token(profile_id: String, host: String) -> bool {
+    forge::gitlab_host(&host).ok().and_then(|h| forge::gitlab_token(&profile_id, &h)).is_some()
+}
+
+/// Save a profile's GitLab token for `host` in the Keychain (an empty token removes it).
+#[tauri::command]
+fn set_gitlab_token(profile_id: String, host: String, token: String) -> R<()> {
+    forge::set_gitlab_token(&profile_id, &forge::gitlab_host(&host)?, &token)
+}
+
+/// The account a GitHub or GitLab token signs in as (Profiles → Check).
+#[tauri::command(async)]
+fn token_whoami(profile_id: String, forge: String, host: String, token: String) -> R<String> {
+    forge::whoami(&forge, &host, &profile_id, &token)
 }
 
 /// What `head` changes since it left `base` (a pull request's changes).
@@ -709,6 +731,9 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "get_unreachable" => to_value(get_unreachable(repo)?).unwrap(),
         "default_branch" => json!(default_branch(repo, s("remote"))),
         "pull_requests" => to_value(pull_requests(s("profile_id"), repo, s("remote"))?).unwrap(),
+        "has_gitlab_token" => json!(has_gitlab_token(s("profile_id"), s("host"))),
+        "set_gitlab_token" => json!(set_gitlab_token(s("profile_id"), s("host"), s("token"))?),
+        "token_whoami" => json!(token_whoami(s("profile_id"), s("forge"), s("host"), s("token"))?),
         "pr_detail" => pr_detail(s("profile_id"), repo, s("remote"), get("number").and_then(|v| v.as_u64()).unwrap_or(0))?,
         "range_changes" => to_value(range_changes(repo, s("base"), s("head"))?).unwrap(),
         "tree_files" => json!(tree_files(repo, s("rev"))?),
@@ -826,6 +851,9 @@ fn main() {
             pull_requests,
             pr_detail,
             pr_action,
+            has_gitlab_token,
+            set_gitlab_token,
+            token_whoami,
             range_changes,
             tree_files,
             file_at,

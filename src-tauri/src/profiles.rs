@@ -20,6 +20,8 @@ pub struct Profile {
     pub git_email: String,
     /// Expected remote owners, e.g. "github.com/acme" or just "acme".
     pub remote_owners: Vec<String>,
+    /// Self-hosted GitLab server for merge requests ("git.acme.io"); empty = gitlab.com only.
+    pub gitlab_host: String,
     /// Repository roots shown as tabs, in order.
     pub tabs: Vec<String>,
     pub active_tab: usize,
@@ -131,6 +133,9 @@ pub fn validate(store: &Store) -> R<()> {
         }
         if store.profiles[..i].iter().any(|q| q.id == p.id) {
             return Err(format!("duplicate profile id {}", p.id));
+        }
+        if !p.gitlab_host.is_empty() {
+            crate::forge::gitlab_host(&p.gitlab_host)?;
         }
         if !p.ssh_key.is_empty() && !Path::new(&p.ssh_key).is_file() {
             return Err(format!("SSH key not found for {}: {}", p.name, p.ssh_key));

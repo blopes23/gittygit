@@ -262,7 +262,23 @@ input, textarea { font: inherit; color: var(--text); }
 .pr-check a { color: var(--text); cursor: pointer; }
 .pr-check a:hover { text-decoration: underline; }
 .pr-check small { color: var(--text-faint); margin-left: auto; }
-.pr-acts { margin-top: 10px; }
+.acct { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.acct-h { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.acct-state { margin-left: auto; font-size: 11px; color: var(--text-faint); }
+.acct-state.ok { color: var(--green); }
+.acct-state.bad { color: var(--red); }
+.acct-state.warn { color: var(--orange); }
+.acct .hint a { color: var(--accent); }
+.acct .line input { flex: 1; min-width: 0; }
+.pr-meta .arrow { color: var(--text-faint); margin: 0 2px; }
+.pr-card { margin-top: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); display: flex; flex-direction: column; gap: 4px; }
+.pr-card .pr-checks { margin-top: 0; }
+.pr-approved { font-size: 12px; color: var(--text-dim); }
+.pr-bar { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: nowrap; }
+.pr-bar .mini { padding: 3px 10px; font-size: 12px; white-space: nowrap; }
+.pr-bar .spacer { flex: 1; }
+.pr-bar .icon-mini { padding: 3px 8px; }
+.caret-s { font-size: 9px; color: var(--text-dim); margin-left: 2px; }
 .mini.primary-mini { background: var(--accent); color: #08202b; border-color: var(--accent); font-weight: 600; }
 .mini:disabled { opacity: .45; cursor: default; }
 .pr-text { padding: 6px 14px 10px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.5; user-select: text; -webkit-user-select: text; }

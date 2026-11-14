@@ -125,7 +125,7 @@ const aiDlg = $('#ai-dlg');
  * Drafts the pull request for `remoteRef` into `baseRef` in a dialog, then opens GitHub's
  * compare page with the title and description filled in.
  */
-async function aiPullRequest({ compareUrl, remoteRef, baseRef }) {
+async function aiPullRequest({ compareUrl, fields, remoteRef, baseRef }) {
   let ctx;
   try {
     ctx = await invoke('ai_pr_context', { repo: S.repo, branch: remoteRef, base: baseRef });
@@ -135,6 +135,8 @@ async function aiPullRequest({ compareUrl, remoteRef, baseRef }) {
   }
   const title = $('#ai-pr-title'), body = $('#ai-pr-body'), status = $('#ai-status');
   title.value = body.value = '';
+  $('#ai-dlg h3').textContent = `New ${prWords().one}`;
+  $('#ai-dlg button[value="ok"]').textContent = `Open on ${prWords().site}`;
   status.textContent = `${AI.cfg.model} is reading ${remoteRef} → ${baseRef} (~${readingTime(ctx)} s)…`;
   aiDlg.returnValue = '';
   aiDlg.showModal();
@@ -160,12 +162,12 @@ async function aiPullRequest({ compareUrl, remoteRef, baseRef }) {
     return toast('Title and description copied', 'ok');
   }
   if (choice !== 'ok') return;
-  const url = `${compareUrl}&title=${encodeURIComponent(t)}&body=${encodeURIComponent(b)}`;
+  const url = `${compareUrl}&${fields.title}=${encodeURIComponent(t)}&${fields.body}=${encodeURIComponent(b)}`;
   // Very long links get cut off by browsers or GitHub: copy the description instead.
   if (url.length > 7000) {
     await navigator.clipboard.writeText(b);
     toast('The description is long, so it was copied: paste it into GitHub', 'ok');
-    return openUrl(`${compareUrl}&title=${encodeURIComponent(t)}`);
+    return openUrl(`${compareUrl}&${fields.title}=${encodeURIComponent(t)}`);
   }
   openUrl(url);
 }

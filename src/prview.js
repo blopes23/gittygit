@@ -1,7 +1,8 @@
 'use strict';
-// A pull request in the detail panel (sidebar → Pull requests): description, checks, reviews and
-// comments, its changes and files, and the actions: approve, request changes, comment, merge,
-// close, check out. Reading works without a token for public repositories; acting needs one.
+// A pull request (GitHub) or merge request (GitLab) in the detail panel: description, checks,
+// reviews and comments, its changes and files, and the actions the host supports (Review ▾:
+// approve, request changes, comment; Merge; ⋯: check out, open, copy link, refresh, close).
+// Reading works without a token for public repositories; acting needs one.
 
 const REVIEW_STATE = { APPROVED: ['approved', 'ok'], CHANGES_REQUESTED: ['requested changes', 'bad'], COMMENTED: ['commented', ''], DISMISSED: ['review dismissed', ''] };
 
@@ -33,7 +34,7 @@ async function prHead(d) {
   try {
     await invoke('get_commit', { repo: S.repo, sha: d.head_sha });
   } catch {
-    await busy(() => gitRaw(['fetch', '--no-tags', '--quiet', defaultRemote(), `pull/${d.number}/head`]));
+    await busy(() => gitRaw(['fetch', '--no-tags', '--quiet', defaultRemote(), d.fetch_ref]));
   }
   return d.head_sha;
 }
@@ -74,46 +75,48 @@ function checksHtml(checks) {
 async function renderPR() {
   const p = S.pr;
   const pr = findPR(p.number);
+  const w = prWords();
+  const stub = (msg) =>
+    `<div class="d-head"><div class="sha-line"><span>${w.one} ${w.sign}${p.number}</span></div><h2>${esc(pr?.title || '')}</h2></div><div class="d-scroll"><div class="f-empty">${msg}</div></div>`;
   if (!p.detail && !p.error) {
-    $('#detail').innerHTML = `<div class="d-head"><div class="sha-line"><span>pull request #${p.number}</span></div><h2>${esc(pr?.title || '')}</h2></div><div class="d-scroll"><div class="f-empty">Loading…</div></div>`;
+    $('#detail').innerHTML = stub('Loading…');
     await loadPR(p);
     if (S.pr !== p) return;
   }
-  if (p.error) {
-    $('#detail').innerHTML = `<div class="d-head"><div class="sha-line"><span>pull request #${p.number}</span></div><h2>${esc(pr?.title || '')}</h2></div><div class="d-scroll"><div class="f-empty">${esc(p.error)}</div></div>`;
-    return;
-  }
+  if (p.error) return ($('#detail').innerHTML = stub(esc(p.error)));
   const d = p.detail;
   const [status, cls] = mergeStatus(d);
   const open = d.state === 'open';
-  const fork = d.head_repo && d.head_repo !== d.slug ? ` <small>(${esc(d.head_repo)})</small>` : '';
-  const labels = d.labels.map((l) => `<span class="pr-label">${esc(l)}</span>`).join('');
-  const acts = !open
-    ? ''
-    : `<div class="multi-acts pr-acts">
-        <button class="mini" data-pr="approve">Approve</button>
-        <button class="mini" data-pr="request_changes">Request changes…</button>
-        <button class="mini" data-pr="comment">Comment…</button>
-        <button class="mini primary-mini" data-pr="merge"${d.mergeable_state === 'dirty' || d.draft ? ' disabled' : ''}>Merge…</button>
-        <button class="mini danger" data-pr="close">Close</button>
-      </div>`;
-  const tabs = detailTabs([['overview', 'Overview'], ['changes', `Changes (${d.changed_files})`], ['files', 'Files']]);
+  const fork = d.head_repo && d.head_repo !== d.slug ? ` <small>(${esc(d.head_repo === 'fork' ? 'fork' : d.head_repo)})</small>` : '';
+  const labels = (d.labels || []).map((l) => `<span class="pr-label">${esc(l)}</span>`).join('');
+  const stats = [
+    d.commits != null && `${d.commits} commit${d.commits === 1 ? '' : 's'}`,
+    d.additions != null && `<span class="add">+${d.additions}</span> <span class="del">−${d.deletions}</span>`,
+  ].filter(Boolean);
+  const approved = d.approved_by?.length ? `<div class="pr-approved">Approved by ${d.approved_by.map(esc).join(', ')}</div>` : '';
+  const mergeBlocked = d.mergeable_state === 'dirty' ? 'Resolve the conflicts first' : d.draft ? `A draft can't be merged` : '';
+  const noToken = open && !d.authed;
+  const bar = `<div class="pr-bar">
+      ${open ? `<button class="mini" data-pr="review"${noToken ? ' disabled' : ''}>Review <span class="caret-s">▾</span></button>
+      <button class="mini primary-mini" data-pr="merge"${noToken || mergeBlocked ? ` disabled title="${esc(mergeBlocked || 'Add a token first')}"` : ''}>Merge…</button>` : ''}
+      <span class="spacer"></span>
+      <button class="mini icon-mini" data-pr="more" title="More actions">⋯</button>
+    </div>
+    ${noToken ? `<div class="b-switch"><span>Add a ${w.site} token to review or merge.</span><a data-pr="profiles">Open Profiles</a></div>` : ''}`;
+  const tabs = detailTabs([['overview', 'Overview'], ['changes', `Changes${d.changed_files != null ? ` (${d.changed_files})` : ''}`], ['files', 'Files']]);
   $('#detail').innerHTML = `
     <div class="d-head">
-      <div class="sha-line"><span>pull request <a data-url="${esc(d.url)}">#${d.number}</a></span><span>${esc(d.author)} · ${fmtIso(d.created_at)}</span></div>
+      <div class="sha-line"><span>${w.one} <a data-url="${esc(d.url)}">${w.sign}${d.number}</a></span><span>${esc(d.author)} · ${fmtIso(d.created_at)}</span></div>
       <h2>${esc(d.title)}</h2>
-      <div class="pr-meta"><code>${esc(d.head_ref)}</code>${fork} → <code>${esc(d.base_ref)}</code> · ${d.commits} commit${d.commits === 1 ? '' : 's'} · <span class="add">+${d.additions}</span> <span class="del">−${d.deletions}</span>${labels}</div>
-      <div class="pr-st ${cls}">${status}</div>
-      ${checksHtml(d.checks)}
-      ${acts}
-      ${open && !d.authed ? '<div class="b-switch"><span>Add a GitHub token in Profiles to review, merge or close.</span></div>' : ''}
-      <div class="multi-acts"><button class="mini" data-pr="checkout">Check out</button><button class="mini" data-pr="github">Open on GitHub</button><button class="mini" data-pr="reload">Refresh</button></div>
+      <div class="pr-meta"><code>${esc(d.head_ref)}</code>${fork}<span class="arrow">→</span><code>${esc(d.base_ref)}</code>${stats.length ? ` · ${stats.join(' · ')}` : ''}${labels}</div>
+      <div class="pr-card"><div class="pr-st ${cls}">${status}</div>${approved}${checksHtml(d.checks)}</div>
+      ${bar}
       ${tabs}
     </div>
     <div class="d-scroll" id="pr-body"></div>`;
   const body = $('#pr-body');
   if (S.dtab === 'overview') return (body.innerHTML = prOverviewHtml(d));
-  body.innerHTML = '<div class="f-empty">Getting the pull request’s commits…</div>';
+  body.innerHTML = `<div class="f-empty">Getting the ${w.one}’s commits…</div>`;
   let head;
   try {
     head = await prHead(d);
@@ -145,33 +148,65 @@ function prOverviewHtml(d) {
       return `<div class="pr-event"><div class="pr-event-h"><b>${esc(t.author)}</b> <span class="pr-st ${c}">${what}</span> <small>${fmtIso(t.at)}</small></div>${t.body?.trim() ? `<div class="pr-text">${esc(t.body.trim())}</div>` : ''}</div>`;
     })
     .join('');
-  return `<div class="f-section-h">Description</div>${desc}${requested}<div class="f-section-h">Reviews and comments (${d.timeline.length})</div>${items || '<div class="f-empty">None yet.</div>'}`;
+  const none = d.timeline_hidden ? `<div class="f-empty">${prWords().site} shows comments only with a token (Profiles → Accounts).</div>` : '<div class="f-empty">None yet.</div>';
+  return `<div class="f-section-h">Description</div>${desc}${requested}<div class="f-section-h">Reviews and comments (${d.timeline.length})</div>${items || none}`;
 }
 
 // ------------------------------------------------------------------ actions
 
-$('#detail').addEventListener('click', async (e) => {
+/** Opens a menu under a button (like the diff view's ⋯). */
+function menuAt(btn, items) {
+  const r = btn.getBoundingClientRect();
+  showMenu({ clientX: r.left, clientY: r.bottom + 4 }, items);
+}
+
+$('#detail').addEventListener('click', (e) => {
   const link = e.target.closest('[data-url]');
   if (link && S.pr) return link.dataset.url && openUrl(link.dataset.url);
   const b = e.target.closest('[data-pr]');
-  if (!b || !S.pr?.detail) return;
-  const p = S.pr, d = p.detail;
+  if (!b || b.disabled || !S.pr?.detail) return;
+  const d = S.pr.detail;
+  const w = prWords();
+  const can = (a) => d.actions.includes(a);
   const act = b.dataset.pr;
-  if (act === 'github') return openUrl(d.url);
-  if (act === 'checkout') return checkoutPR(d.number);
-  if (act === 'reload') {
-    p.detail = p.error = null;
-    return renderPR();
+  if (act === 'review')
+    return menuAt(b, [
+      can('approve') && ['Approve…', () => prAct('approve')],
+      can('request_changes') && ['Request changes…', () => prAct('request_changes')],
+      can('comment') && ['Comment…', () => prAct('comment')],
+    ]);
+  if (act === 'more') {
+    const open = d.state === 'open';
+    return menuAt(b, [
+      ['Check out locally', () => checkoutPR(d.number)],
+      [`Open on ${w.site}`, () => openUrl(d.url)],
+      ['Copy link', () => navigator.clipboard.writeText(d.url).then(() => toast('Link copied'))],
+      ['Refresh', () => {
+        S.pr.detail = S.pr.error = null;
+        renderPR();
+      }],
+      open && can('close') && d.authed && null,
+      open && can('close') && d.authed && [`Close ${w.one}…`, () => prAct('close'), 'danger'],
+    ]);
   }
+  if (act === 'profiles') return openProfileEditor();
+  prAct(act);
+});
+
+/** Asks what's needed for an action, runs it on the host and reloads the view. */
+async function prAct(act) {
+  const p = S.pr, d = p.detail;
+  const w = prWords();
+  const ref = `${w.sign}${d.number}`;
   let body = '', method = '', del = false;
   if (act === 'approve') {
-    const t = await askText(`Approve #${d.number}?`, { ok: 'Approve', hint: 'An optional comment goes with the approval.' });
+    const t = await askText(`Approve ${ref}?`, { ok: 'Approve', hint: 'An optional comment goes with the approval.' });
     if (t === null) return;
     body = t;
   } else if (act === 'request_changes' || act === 'comment') {
-    const t = await askText(act === 'comment' ? `Comment on #${d.number}` : `Request changes on #${d.number}`, {
+    const t = await askText(act === 'comment' ? `Comment on ${ref}` : `Request changes on ${ref}`, {
       ok: act === 'comment' ? 'Comment' : 'Request changes',
-      hint: act === 'comment' ? 'Posted to the pull request’s conversation.' : 'Tell the author what needs to change before this can merge.',
+      hint: act === 'comment' ? `Posted to the ${w.one}’s conversation.` : 'Tell the author what needs to change before this can merge.',
       required: true,
     });
     if (t === null) return;
@@ -181,7 +216,7 @@ $('#detail').addEventListener('click', async (e) => {
     if (!m) return;
     ({ title: body, method, del } = m);
   } else if (act === 'close') {
-    if (!(await ask(`Close #${d.number} without merging?\n\nIts branch stays; it can be reopened on GitHub.`, { ok: 'Close pull request', danger: true }))) return;
+    if (!(await ask(`Close ${ref} without merging?\n\nIts branch stays, and it can be reopened on ${w.site}.`, { ok: `Close ${w.one}`, danger: true }))) return;
   }
   let msg;
   try {
@@ -195,7 +230,7 @@ $('#detail').addEventListener('click', async (e) => {
     p.detail = null;
     renderPR();
   }
-});
+}
 
 /** A multi-line text prompt; resolves to the text (possibly empty) or null when cancelled. */
 function askText(title, { ok = 'OK', hint = '', required = false, value = '' } = {}) {
@@ -218,13 +253,14 @@ function askText(title, { ok = 'OK', hint = '', required = false, value = '' } =
 function askMerge(d) {
   const dlg = $('#merge-dlg'), sel = $('#mg-method'), title = $('#mg-title'), del = $('#mg-delete');
   const names = { merge: 'Create a merge commit', squash: 'Squash and merge', rebase: 'Rebase and merge' };
+  $('#merge-dlg h3').textContent = `Merge ${prWords().one}`;
   const last = load('gg.mergeMethod', 'merge');
   sel.innerHTML = d.merge_methods.map((m) => `<option value="${m}"${m === last ? ' selected' : ''}>${names[m]}</option>`).join('');
   title.value = `${d.title} (#${d.number})`;
   const sameRepo = !d.head_repo || d.head_repo === d.slug;
   del.checked = sameRepo && d.delete_branch_on_merge;
   del.disabled = !sameRepo;
-  $('#mg-delete-label').textContent = sameRepo ? `Delete ${d.head_ref} on GitHub afterwards` : 'The branch is in a fork and stays there';
+  $('#mg-delete-label').textContent = sameRepo ? `Delete ${d.head_ref} on ${prWords().site} afterwards` : 'The branch is in a fork and stays there';
   $('#mg-what').textContent = `${d.head_ref} → ${d.base_ref}`;
   const sync = () => ($('#mg-title-row').hidden = sel.value === 'rebase');
   sel.onchange = sync;
