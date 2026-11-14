@@ -45,9 +45,9 @@ async function pull(mode = pullMode()) {
   fetchSucceeded(S.repo);
   if (!diverged) return;
   if (mode === 'ff-only')
-    return toast(`Can't fast-forward ${b.name}: it and ${b.upstream} both have new commits. Use Pull ▾ → Merge or Rebase.`, 'err');
+    return toast(`Can't fast-forward ${b.name}: it and ${b.upstream} both have new commits. Use the Pull menu → Merge or Rebase.`, 'err');
   const choice = await ask(
-    `${b.name} and ${b.upstream} both have new commits.\n\nRebase replays your commits on top of ${b.upstream} (linear history). Merge joins them with a merge commit.\n\nYour choice is remembered for this repository; change it any time from Pull ▾.`,
+    `${b.name} and ${b.upstream} both have new commits.\n\nRebase replays your commits on top of ${b.upstream} (linear history). Merge joins them with a merge commit.\n\nYour choice is remembered for this repository; change it any time from the Pull menu.`,
     { ok: 'Rebase', alt: 'Merge' },
   );
   if (!choice) return;

@@ -1,6 +1,6 @@
 'use strict';
 // A pull request (GitHub) or merge request (GitLab) in the detail panel: description, checks,
-// reviews and comments, its changes and files, and the actions the host supports (Review ▾:
+// reviews and comments, its changes and files, and the actions the host supports (Review menu:
 // approve, request changes, comment; Merge; ⋯: check out, open, copy link, refresh, close).
 // Reading works without a token for public repositories; acting needs one.
 
@@ -97,7 +97,7 @@ async function renderPR() {
   const mergeBlocked = d.mergeable_state === 'dirty' ? 'Resolve the conflicts first' : d.draft ? `A draft can't be merged` : '';
   const noToken = open && !d.authed;
   const bar = `<div class="pr-bar">
-      ${open ? `<button class="mini" data-pr="review"${noToken ? ' disabled' : ''}>Review <span class="caret-s">▾</span></button>
+      ${open ? `<button class="mini" data-pr="review"${noToken ? ' disabled' : ''}>Review ${CHEVRON}</button>
       <button class="mini primary-mini" data-pr="merge"${noToken || mergeBlocked ? ` disabled title="${esc(mergeBlocked || 'Add a token first')}"` : ''}>Merge…</button>` : ''}
       <span class="spacer"></span>
       <button class="mini icon-mini" data-pr="more" title="More actions">⋯</button>

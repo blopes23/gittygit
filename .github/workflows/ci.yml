@@ -37,6 +37,9 @@ jobs:
 
       - run: npm ci
 
+      - name: UI checks
+        run: npm run check
+
       # The watcher timing test depends on FSEvents latency, which is unreliable on shared runners.
       - name: Rust tests
         working-directory: src-tauri
