@@ -1,6 +1,6 @@
 [package]
 name = "gittygit"
-version = "0.2.9"
+version = "0.3.0"
 description = "A fast, lightweight Git client for macOS"
 license = "MIT"
 edition = "2021"
