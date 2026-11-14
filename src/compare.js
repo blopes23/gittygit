@@ -72,6 +72,7 @@ function renderMulti() {
 
 function setCompare(c) {
   S.compare = c;
+  S.pr = null;
   S.multi.clear();
   closeDiff();
   renderRows();

@@ -669,13 +669,42 @@ pub fn branch_changes(repo: &str, refname: &str) -> R<BranchChanges> {
     let time = |f: &String| times.get(f).copied().unwrap_or(0);
     let best = forks.iter().map(|(_, f)| time(f)).max().unwrap_or(0);
     // The first of equally close candidates, so a remote branch wins over its local copy.
-    let (base, fork) = forks.iter().find(|(_, f)| time(f) == best).cloned().unwrap();
+    let (base, _) = forks.iter().find(|(_, f)| time(f) == best).cloned().unwrap();
 
-    let counts = run(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{tip}")])?;
+    let r = range_changes(repo, &base, &tip)?;
+    Ok(BranchChanges { base: Some(short(&base)), merged_into: None, ..r })
+}
+
+/// What `head` changes since it left `base` (their merge base), as a pull request shows it.
+pub fn range_changes(repo: &str, base: &str, head: &str) -> R<BranchChanges> {
+    let base_sha = commit_rev(repo, base)?;
+    let tip = commit_rev(repo, head)?;
+    let fork = run(repo, &["merge-base", &base_sha, &tip]).map_err(|_| format!("{head} and {base} have no common history"))?.trim().to_string();
+    let counts = run(repo, &["rev-list", "--left-right", "--count", &format!("{base_sha}...{tip}")])?;
     let mut n = counts.split_whitespace().map(|x| x.parse().unwrap_or(0));
     let (behind, ahead) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
     let files = parse_name_status(&run(repo, &["diff", "--name-status", "-z", "-M", &fork, &tip])?);
-    Ok(BranchChanges { base: Some(short(&base)), merged_into: None, fork, ahead, behind, files })
+    Ok(BranchChanges { base: Some(base.to_string()), merged_into: None, fork, ahead, behind, files })
+}
+
+/// Every file path in a commit's tree (the whole project at that point).
+pub fn tree_files(repo: &str, rev: &str) -> R<Vec<String>> {
+    let sha = commit_rev(repo, rev)?;
+    Ok(run(repo, &["ls-tree", "-r", "-z", "--name-only", &sha])?.split('\0').filter(|p| !p.is_empty()).map(String::from).collect())
+}
+
+/// A file's text at a commit; an error for binary or very large files.
+pub fn file_at(repo: &str, rev: &str, path: &str) -> R<String> {
+    let spec = format!("{}:{path}", commit_rev(repo, rev)?);
+    let size: u64 = run(repo, &["cat-file", "-s", &spec]).map_err(|_| format!("{path} isn't in that commit"))?.trim().parse().unwrap_or(0);
+    if size > 4 << 20 {
+        return Err(format!("{path} is too large to show ({} MB)", size >> 20));
+    }
+    let text = run(repo, &["cat-file", "blob", &spec])?;
+    if text.contains('\0') {
+        return Err(format!("{path} is a binary file"));
+    }
+    Ok(text)
 }
 
 // ---------------------------------------------------------------- submodules, LFS, worktrees
@@ -1594,6 +1623,16 @@ mod tests {
         let done = branch_changes(&r, "refs/heads/feature").unwrap();
         assert_eq!((done.base, done.merged_into.as_deref()), (None, Some("development")));
         assert!(branch_changes(&r, "HEAD").is_err());
+        // The whole tree at a branch, a file in it, and a range between two revisions.
+        assert_eq!(tree_files(&r, "feature").unwrap(), ["base", "mine", "theirs1", "theirs2"]);
+        assert_eq!(file_at(&r, "feature", "mine").unwrap(), "1\n");
+        assert!(file_at(&r, "feature", "nope").is_err());
+        std::fs::write(Path::new(&r).join("bin"), b"a\0b").unwrap();
+        run(&r, &["add", "bin"]).unwrap();
+        run(&r, &["commit", "-q", "-m", "bin"]).unwrap();
+        assert!(file_at(&r, "HEAD", "bin").unwrap_err().contains("binary"));
+        let rc = range_changes(&r, "main", "feature").unwrap();
+        assert_eq!(rc.files.len(), 3);
         std::fs::remove_dir_all(&r).unwrap();
     }
 

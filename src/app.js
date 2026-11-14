@@ -773,7 +773,8 @@ $('#sidebar').addEventListener('click', (e) => {
     const [a, b] = [order.indexOf(S.sbAnchor), order.indexOf(name)].sort((x, y) => x - y);
     if (a >= 0) return setBranchSelection(order.slice(a, b + 1));
   }
-  if (kind === 'pr' || kind === 'submodule' || kind === 'worktree') {
+  if (kind === 'pr') return openPR(+name);
+  if (kind === 'submodule' || kind === 'worktree') {
     if (S.index.has(it.dataset.sha)) jumpTo(it.dataset.sha);
     return;
   }
@@ -1237,6 +1238,8 @@ function select(sha, scroll = false, branch = null) {
   if (!sha) return;
   S.selected = sha;
   S.branch = branch && { ...branch, sha, view: 'branch' };
+  S.range = null; // set by the view that lists a range's files (branch, pull request)
+  S.pr = null;
   S.multi.clear();
   S.compare = null;
   closeDiff();
@@ -1556,6 +1559,7 @@ function markCutPaths() {
 new ResizeObserver(() => markCutPaths()).observe($('#detail'));
 
 function renderDetail() {
+  if (S.repo && S.pr) return renderPR();
   if (!S.repo || !S.selected) {
     $('#detail').innerHTML = '';
     return;
@@ -1720,7 +1724,7 @@ $('#detail').addEventListener('click', (e) => {
   if (row && row.dataset.mode === 'conflict') return openConflict(row.dataset.path, row.dataset.xy);
   if (row) {
     const mode = row.dataset.mode;
-    const [a, b] = mode !== 'range' ? [] : S.compare ? [S.compare.a, S.compare.b] : [S.branch.fork, S.branch.sha];
+    const [a, b] = mode !== 'range' ? [] : S.compare ? [S.compare.a, S.compare.b] : [S.range.a, S.range.b];
     const sha = mode === 'commit' ? S.selected : mode === 'range' ? a : null;
     showDiff({ path: row.dataset.path, mode, sha, sha2: mode === 'range' ? b : null, untracked: row.dataset.status === '?' });
   }
@@ -1764,11 +1768,13 @@ async function renderCommit(sha) {
       ${S.branch?.sha !== sha ? ''
         : S.branch.mergedInto ? `<div class="b-switch"><span>Everything on ${esc(S.branch.name)} is already in ${esc(S.branch.mergedInto)}; showing its latest commit</span></div>`
         : !S.branch.mainline ? `<div class="b-switch"><span>Latest commit of ${esc(S.branch.name)}</span><a data-bview="branch">Show all branch changes</a></div>` : ''}
+      ${detailTabs([['changes', `Changes (${c.files.length})`], ['files', 'Files']])}
     </div>
-    <div class="d-scroll">
+    <div class="d-scroll">${S.dtab === 'files' ? '' : `
       <div class="f-section-h">${c.files.length} changed file${c.files.length === 1 ? '' : 's'}${c.parents.length > 1 ? ' <small>(vs first parent)</small>' : ''}</div>
-      ${fileRows(c.files, 'commit') || '<div class="f-empty">No file changes</div>'}
+      ${fileRows(c.files, 'commit') || '<div class="f-empty">No file changes</div>'}`}
     </div>`;
+  if (S.dtab === 'files') return showTree($('#detail .d-scroll'), c.sha, new Map(c.files.map((f) => [f.path, f.status])));
   fileListDrawn();
 }
 
@@ -1797,7 +1803,7 @@ async function renderBranch() {
     b.mergedInto = res.merged_into;
     return renderCommit(b.sha);
   }
-  b.fork = res.fork;
+  S.range = { a: res.fork, b: b.sha };
   const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const behind = res.behind ? `, ${plural(res.behind, 'commit')} behind` : '';
   $('#detail').innerHTML = `
@@ -1805,11 +1811,13 @@ async function renderBranch() {
       <div class="sha-line"><span>branch</span><span>since it left <code>${esc(res.base)}</code></span></div>
       <h2>${esc(b.name)}</h2>
       <div class="b-switch"><span>${plural(res.ahead, 'commit')} ahead of ${esc(res.base)}${behind}</span><a data-bview="commit">Show latest commit only</a></div>
+      ${detailTabs([['changes', `Changes (${res.files.length})`], ['files', 'Files']])}
     </div>
-    <div class="d-scroll">
+    <div class="d-scroll">${S.dtab === 'files' ? '' : `
       <div class="f-section-h">${plural(res.files.length, 'changed file')} on this branch</div>
-      ${fileRows(res.files, 'range') || '<div class="f-empty">No file changes</div>'}
+      ${fileRows(res.files, 'range') || '<div class="f-empty">No file changes</div>'}`}
     </div>`;
+  if (S.dtab === 'files') return showTree($('#detail .d-scroll'), b.sha, new Map(res.files.map((f) => [f.path, f.status])));
   fileListDrawn();
 }
 
@@ -2046,7 +2054,8 @@ function diffActionsHtml(file) {
   const nav = file.untracked
     ? ''
     : ['blame', 'history'].filter((m) => m !== file.mode).map((m) => `<button class="mini sec" data-diff-do="${m}">${m[0].toUpperCase()}${m.slice(1)}</button>`).join('');
-  const view = file.mode === 'blame' || file.mode === 'history' ? '' : `<button class="mini sec" data-diff-do="split" title="Switch between inline and side-by-side">${diffPrefs.split ? 'Inline' : 'Side by side'}</button>`;
+  const changes = file.mode === 'view' && file.diff ? '<button class="mini" data-diff-do="changes" title="What changed in this file here">Changes</button>' : '';
+  const view = ['blame', 'history', 'view'].includes(file.mode) ? changes : `<button class="mini sec" data-diff-do="split" title="Switch between inline and side-by-side">${diffPrefs.split ? 'Inline' : 'Side by side'}</button>`;
   // Shown instead of the .sec buttons when the pane is narrow (see styles.css).
   const more = view || nav ? '<button class="mini more" data-diff-do="more" title="More actions">⋯</button>' : '';
   if (file.mode === 'unstaged') return back + view + nav + more + '<button class="mini" data-diff-do="stage">Stage file</button><button class="mini danger" data-diff-do="discard">Discard</button>';
@@ -2056,6 +2065,7 @@ function diffActionsHtml(file) {
 
 /** Open a full-pane view (diff, blame, history) for a file, replacing the current one. */
 function openFileView(file) {
+  if (file.mode === 'view') return showFileAt(file);
   if (file.mode === 'blame') return showBlame(file);
   if (file.mode === 'history') return showHistory(file);
   return showDiff(file);
@@ -2176,7 +2186,8 @@ $('#diff-actions').addEventListener('click', (e) => {
     save('gg.diffSplit', diffPrefs.split);
     return showDiff(f, true);
   }
-  if (act === 'blame') return openFileView({ mode: 'blame', path: f.path, rev: f.mode === 'commit' ? f.sha : null, back: f });
+  if (act === 'blame') return openFileView({ mode: 'blame', path: f.path, rev: f.mode === 'commit' ? f.sha : f.rev || null, back: f });
+  if (act === 'changes') return showDiff({ ...f.diff, back: f });
   if (act === 'history') return openFileView({ mode: 'history', path: f.path, back: f });
   const status = f.untracked ? '?' : '';
   if (act !== 'discard') closeDiff();
@@ -2189,7 +2200,7 @@ $('#detail').addEventListener('contextmenu', (e) => {
   if (!row) return;
   e.preventDefault();
   const { path, mode, status } = row.dataset;
-  const sha = mode === 'commit' ? S.selected : mode === 'range' && !S.compare ? S.branch?.sha : null;
+  const sha = mode === 'commit' ? S.selected : mode === 'range' && !S.compare ? S.range?.b : mode === 'tree' ? TREE.rev : null;
   const isNew = status === '?' || (mode === 'staged' && status === 'A');
   showMenu(e, [
     !isNew && status !== 'D' && ['Blame', () => openFileView({ mode: 'blame', path, rev: sha })],

@@ -174,6 +174,27 @@
     </form>
   </dialog>
 
+  <dialog id="text-dlg">
+    <form method="dialog" class="st-form">
+      <h3 id="text-dlg-title"></h3>
+      <p class="hint" id="text-dlg-hint"></p>
+      <textarea id="text-dlg-body" rows="7" spellcheck="true"></textarea>
+      <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary" id="text-dlg-ok">OK</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="merge-dlg">
+    <form method="dialog" class="st-form">
+      <h3>Merge pull request</h3>
+      <p class="hint" id="mg-what"></p>
+      <label class="fld">How <select id="mg-method"></select></label>
+      <label class="fld" id="mg-title-row">Commit title <input id="mg-title" spellcheck="true" autocomplete="off"></label>
+      <label class="st-check"><input type="checkbox" id="mg-delete"><span id="mg-delete-label"></span></label>
+      <p class="hint">This merges on GitHub right away and can't be undone from here.</p>
+      <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Merge</button></menu>
+    </form>
+  </dialog>
+
   <dialog id="token-dlg">
     <form method="dialog" class="st-form">
       <h3>Access token for <span id="tk-host"></span></h3>
@@ -243,6 +264,8 @@
   <script src="profiles.js"></script>
   <script src="remote.js"></script>
   <script src="github.js"></script>
+  <script src="browse.js"></script>
+  <script src="prview.js"></script>
   <script src="advanced.js"></script>
   <script src="ai.js"></script>
   <script src="settings.js"></script>

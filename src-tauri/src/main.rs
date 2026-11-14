@@ -538,6 +538,39 @@ fn pull_requests(profile_id: String, repo: String, remote: String) -> R<github::
     github::pull_requests(&repo, &remote, &profile_id)
 }
 
+/// One pull request with its description, reviews, comments and checks.
+#[tauri::command(async)]
+fn pr_detail(profile_id: String, repo: String, remote: String, number: u64) -> R<serde_json::Value> {
+    profiles::load().for_repo(&profile_id, &repo)?;
+    github::pr_detail(&repo, &remote, &profile_id, number)
+}
+
+/// Approve, request changes, comment on, merge or close a pull request.
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
+fn pr_action(profile_id: String, repo: String, remote: String, number: u64, action: String, body: String, method: String, delete_branch: bool) -> R<String> {
+    profiles::load().for_repo(&profile_id, &repo)?;
+    github::pr_action(&repo, &remote, &profile_id, number, &action, &body, &method, delete_branch)
+}
+
+/// What `head` changes since it left `base` (a pull request's changes).
+#[tauri::command(async)]
+fn range_changes(repo: String, base: String, head: String) -> R<git::BranchChanges> {
+    git::range_changes(&repo, &base, &head)
+}
+
+/// Every file in a commit's tree.
+#[tauri::command(async)]
+fn tree_files(repo: String, rev: String) -> R<Vec<String>> {
+    git::tree_files(&repo, &rev)
+}
+
+/// A file's text at a commit.
+#[tauri::command(async)]
+fn file_at(repo: String, rev: String, path: String) -> R<String> {
+    git::file_at(&repo, &rev, &path)
+}
+
 #[tauri::command(async)]
 fn has_github_token(profile_id: String) -> bool {
     github::get_token(&profile_id).is_some()
@@ -676,6 +709,10 @@ fn rpc(cmd: &str, args: &str) -> Result<serde_json::Value, String> {
         "get_unreachable" => to_value(get_unreachable(repo)?).unwrap(),
         "default_branch" => json!(default_branch(repo, s("remote"))),
         "pull_requests" => to_value(pull_requests(s("profile_id"), repo, s("remote"))?).unwrap(),
+        "pr_detail" => pr_detail(s("profile_id"), repo, s("remote"), get("number").and_then(|v| v.as_u64()).unwrap_or(0))?,
+        "range_changes" => to_value(range_changes(repo, s("base"), s("head"))?).unwrap(),
+        "tree_files" => json!(tree_files(repo, s("rev"))?),
+        "file_at" => json!(file_at(repo, s("rev"), s("path"))?),
         "has_github_token" => json!(has_github_token(s("profile_id"))),
         "set_github_token" => json!(set_github_token(s("profile_id"), s("token"))?),
         "git_run" => {
@@ -787,6 +824,11 @@ fn main() {
             get_unreachable,
             default_branch,
             pull_requests,
+            pr_detail,
+            pr_action,
+            range_changes,
+            tree_files,
+            file_at,
             has_github_token,
             set_github_token,
             reveal,
